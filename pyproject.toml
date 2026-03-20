@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "study-tui"
+version = "0.2.0"
+description = "A terminal TUI for studying with PDF/image support and AI-powered subagents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "textual>=0.89",
+    "pymupdf>=1.25",
+    "easyocr>=1.7",
+    "anthropic>=0.40",
+    "openai>=1.0",
+    "tiktoken>=0.8",
+    "cryptography>=44.0",
+    "Pillow>=10.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+anki = [
+    "genanki>=0.13",
+]
+zotero = [
+    "pyzotero>=1.5",
+]
+dev = [
+    "build>=1.2",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+study = "src.app:main"
+study-tui = "src.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -p no:cacheprovider"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "live_provider: makes real provider calls over the network and is skipped by default",
+    "manual_terminal: human-run terminal smoke flow that is not part of default CI",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true

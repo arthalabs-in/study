@@ -1,0 +1,48 @@
+# Python caches and coverage
+__pycache__/
+*.py[cod]
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build and packaging outputs
+build/
+build-tmp/
+dist/
+*.egg-info/
+
+# Local test and probe artifacts
+_test_tmp/
+.tmp/
+.probe-home/
+.probe-codex-home/
+.probe-setup-home/
+.probe-setup-home-codex/
+.pytest-tmp/
+pytest-tmp/
+pytest-cache-files-*/
+uv-cache/
+tmp/
+
+# Debug/session output
+debug-sessions/
+codex-test-output.txt
+
+# Local study material and generated media
+Documents/
+/*.pdf
+probe-*.svg
+
+# Local audit fixtures and planning scratch files
+src/security_audit_artifacts/
+crimson-voyager-ownership-assessment.md
+implementation_plan.md
+
+# Archives and local exports
+*.rar
+ownership-map-out/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

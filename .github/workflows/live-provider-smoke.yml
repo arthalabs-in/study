@@ -1,0 +1,44 @@
+name: Live Provider Smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live-provider-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run live provider smoke tests
+        env:
+          RUN_LIVE_PROVIDER_TESTS: ${{ secrets.RUN_LIVE_PROVIDER_TESTS }}
+          RUN_CODEX_LIVE_TESTS: ${{ secrets.RUN_CODEX_LIVE_TESTS }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          LIVE_OPENAI_MODEL: ${{ secrets.LIVE_OPENAI_MODEL }}
+          LIVE_ANTHROPIC_MODEL: ${{ secrets.LIVE_ANTHROPIC_MODEL }}
+          LIVE_GEMINI_MODEL: ${{ secrets.LIVE_GEMINI_MODEL }}
+          LIVE_KIMI_MODEL: ${{ secrets.LIVE_KIMI_MODEL }}
+          LIVE_OLLAMA_MODEL: ${{ secrets.LIVE_OLLAMA_MODEL }}
+          LIVE_LLAMACPP_MODEL: ${{ secrets.LIVE_LLAMACPP_MODEL }}
+          LIVE_LMSTUDIO_MODEL: ${{ secrets.LIVE_LMSTUDIO_MODEL }}
+          LIVE_OLLAMA_BASE_URL: ${{ secrets.LIVE_OLLAMA_BASE_URL }}
+          LIVE_LLAMACPP_BASE_URL: ${{ secrets.LIVE_LLAMACPP_BASE_URL }}
+          LIVE_LMSTUDIO_BASE_URL: ${{ secrets.LIVE_LMSTUDIO_BASE_URL }}
+          LIVE_CODEX_MODEL: ${{ secrets.LIVE_CODEX_MODEL }}
+        run: python -m pytest tests/test_provider_live.py -m live_provider -q -rs

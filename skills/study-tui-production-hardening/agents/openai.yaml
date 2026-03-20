@@ -1,0 +1,4 @@
+interface:
+  display_name: "Study TUI Hardening"
+  short_description: "CI/CD, release gating, and adversarial tests for Study TUI"
+  default_prompt: "Use $study-tui-production-hardening to harden this repo with working CI/CD, release gates, and aggressive production-readiness tests until the local and workflow checks pass."

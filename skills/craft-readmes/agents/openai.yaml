@@ -1,0 +1,4 @@
+interface:
+  display_name: "Craft READMEs"
+  short_description: "Media-rich professional README creation"
+  default_prompt: "Use $craft-readmes to turn this repo into a polished README with strong visuals, screenshots, and clear onboarding."

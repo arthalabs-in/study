@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brainstorm"
+  short_description: "Deep research for use cases and leverage features"
+  default_prompt: "Use $brainstorm to find strong use cases and high-leverage quality-of-life features for this project."

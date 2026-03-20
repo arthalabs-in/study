@@ -1,0 +1,326 @@
+/* ═══════════════════════════════════════════════════════
+   Study TUI — Multi-Theme Support
+   Themes: Midnight (default), Cyber, Focus, Retro
+   ═══════════════════════════════════════════════════════ */
+
+/* ── Global Layout ──────────────────────────────────── */
+
+Screen {
+    background: #0a0e14;
+    color: #b3b1ad;
+}
+
+Header {
+    dock: top;
+    height: 1;
+}
+
+Footer {
+    dock: bottom;
+    height: 1;
+}
+
+ChatView {
+    height: 1fr;
+    width: 1fr;
+}
+
+#doc-status-bar {
+    dock: top;
+    height: 1;
+    width: 1fr;
+    text-align: center;
+    text-style: dim;
+}
+
+#doc-status-bar.hidden {
+    display: none;
+}
+
+#chat-log {
+    height: 1fr;
+    width: 1fr;
+    padding: 0 2;
+    scrollbar-size: 1 1;
+}
+
+#input-area {
+    dock: bottom;
+    height: auto;
+    max-height: 12;
+}
+
+#cmd-suggest {
+    display: none;
+    height: auto;
+    max-height: 8;
+    margin: 0 1;
+    padding: 0;
+    border: tall $accent;
+    background: $surface;
+    color: #e6e1cf;
+    scrollbar-size: 1 1;
+}
+
+#cmd-suggest > .option-list--option {
+    color: #e6e1cf;
+    background: transparent;
+}
+
+#cmd-suggest > .option-list--option-highlighted {
+    background: #ffb454 20%;
+    color: #ffb454;
+}
+
+#chat-input {
+    height: 3;
+    padding: 0 1;
+}
+
+#typing-indicator {
+    height: auto;
+    padding: 0 2;
+    margin: 0;
+}
+
+#typing-indicator.hidden {
+    display: none;
+}
+
+/* ═══════════════════════════════════════════════════════
+   THEME 1: MIDNIGHT (Default - Ayu Dark inspired)
+   Warm amber/gold on deep navy.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-midnight Screen { background: #0a0e14; color: #b3b1ad; }
+App.theme-midnight Header { background: #0d1117; color: #4d5566; }
+
+App.theme-midnight #doc-status-bar { background: #0d1117; color: #ffb454; }
+
+App.theme-midnight 
+App.theme-midnight HeaderTitle { color: #ffb454; text-style: bold; }
+App.theme-midnight Footer { background: #0d1117; color: #3d424d; }
+App.theme-midnight FooterKey { background: #0d1117; color: #3d424d; }
+App.theme-midnight FooterKey .footer-key--key { background: #11151c; color: #4d5566; }
+
+App.theme-midnight #chat-log {
+    background: #0a0e14;
+    color: #b3b1ad;
+    border: none;
+    scrollbar-color: #1a1f29;
+    scrollbar-color-hover: #ffb45440;
+    scrollbar-color-active: #ffb454;
+}
+
+App.theme-midnight #input-area { background: #0a0e14; padding: 0 2; }
+App.theme-midnight #cmd-suggest { background: #0d1117; color: #e6e1cf; }
+App.theme-midnight #cmd-suggest > .option-list--option { color: #e6e1cf; }
+App.theme-midnight #chat-input {
+    background: #0d1117;
+    color: #e6e1cf;
+    border: tall #1a1f29;
+    margin: 0 0 1 0;
+}
+App.theme-midnight #chat-input:focus { border: tall #e6b450; }
+App.theme-midnight #chat-input .input--placeholder { color: #3d424d; }
+App.theme-midnight #typing-indicator { background: #0a0e14; color: #ffb454; }
+
+
+/* ═══════════════════════════════════════════════════════
+   THEME 2: CYBER (Maximalist Hacker)
+   True black with electric neon accents and heavy borders.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-cyber Screen { background: #000000; color: #a4b5c4; }
+App.theme-cyber Header { background: #000000; color: #00ff41; border-bottom: heavy #00ff41; }
+
+App.theme-cyber #doc-status-bar { background: #000000; color: #00ff41; }
+
+App.theme-cyber 
+App.theme-cyber HeaderTitle { color: #00ff41; text-style: bold italic; }
+App.theme-cyber Footer { background: #000000; color: #008f11; border-top: heavy #00ff41; }
+App.theme-cyber FooterKey { background: #000000; color: #008f11; }
+App.theme-cyber FooterKey .footer-key--key { background: #003b00; color: #00ff41; text-style: bold; }
+
+App.theme-cyber #chat-log {
+    background: #000000;
+    color: #a4b5c4;
+    border: none;
+    scrollbar-color: #003b00;
+    scrollbar-color-hover: #008f11;
+    scrollbar-color-active: #00ff41;
+}
+
+App.theme-cyber #input-area { background: #000000; padding: 0 2; }
+App.theme-cyber #cmd-suggest { background: #000000; color: #00ff41; }
+App.theme-cyber #cmd-suggest > .option-list--option { color: #00ff41; }
+App.theme-cyber #cmd-suggest > .option-list--option-highlighted { background: #003b00; color: #00ff41; }
+App.theme-cyber #chat-input {
+    background: #000000;
+    color: #00ff41;
+    border: heavy #008f11;
+    margin: 0 0 1 0;
+}
+App.theme-cyber #chat-input:focus { border: heavy #00ff41; }
+App.theme-cyber #chat-input .input--placeholder { color: #003b00; }
+App.theme-cyber #typing-indicator { background: #000000; color: #ff00ff; }
+
+
+/* ═══════════════════════════════════════════════════════
+   THEME 3: FOCUS (Refined Minimalist)
+   Tokyo Night inspired. Muted, zero borders, floating input.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-focus Screen { background: #1a1b26; color: #a9b1d6; }
+App.theme-focus Header { background: #16161e; color: #565f89; }
+
+App.theme-focus #doc-status-bar { background: #16161e; color: #7aa2f7; }
+
+App.theme-focus 
+App.theme-focus HeaderTitle { color: #7aa2f7; }
+App.theme-focus Footer { background: #16161e; color: #414868; }
+App.theme-focus FooterKey { background: #16161e; color: #414868; }
+App.theme-focus FooterKey .footer-key--key { background: #1a1b26; color: #565f89; }
+
+App.theme-focus #chat-log {
+    background: #1a1b26;
+    color: #a9b1d6;
+    border: none;
+    scrollbar-color: #16161e;
+    scrollbar-color-hover: #292e42;
+    scrollbar-color-active: #7aa2f7;
+}
+
+App.theme-focus #input-area { background: #1a1b26; padding: 1 4; }
+App.theme-focus #cmd-suggest { background: #24283b; color: #c0caf5; }
+App.theme-focus #cmd-suggest > .option-list--option { color: #c0caf5; }
+App.theme-focus #cmd-suggest > .option-list--option-highlighted { background: #7aa2f7 20%; color: #7aa2f7; }
+App.theme-focus #chat-input {
+    background: #24283b;
+    color: #c0caf5;
+    border: none;
+    margin: 0 0 1 0;
+}
+App.theme-focus #chat-input:focus { background: #292e42; border: none; }
+App.theme-focus #chat-input .input--placeholder { color: #565f89; }
+App.theme-focus #typing-indicator { background: #1a1b26; color: #bb9af7; }
+
+
+/* ═══════════════════════════════════════════════════════
+   THEME 4: RETRO (Library Archive)
+   Warm earthy tones, double/dashed borders, classic vibe.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-retro Screen { background: #282828; color: #ebdbb2; }
+App.theme-retro Header { background: #1d2021; color: #a89984; border-bottom: dashed #a89984; }
+
+App.theme-retro #doc-status-bar { background: #1d2021; color: #d79921; }
+
+App.theme-retro 
+App.theme-retro HeaderTitle { color: #d79921; text-style: bold; }
+App.theme-retro Footer { background: #1d2021; color: #7c6f64; border-top: dashed #a89984; }
+App.theme-retro FooterKey { background: #1d2021; color: #7c6f64; }
+App.theme-retro FooterKey .footer-key--key { background: #3c3836; color: #a89984; }
+
+App.theme-retro #chat-log {
+    background: #282828;
+    color: #ebdbb2;
+    border: none;
+    scrollbar-color: #3c3836;
+    scrollbar-color-hover: #504945;
+    scrollbar-color-active: #d79921;
+}
+
+App.theme-retro #input-area { background: #282828; padding: 0 2; }
+App.theme-retro #cmd-suggest { background: #1d2021; color: #ebdbb2; }
+App.theme-retro #cmd-suggest > .option-list--option { color: #ebdbb2; }
+App.theme-retro #cmd-suggest > .option-list--option-highlighted { background: #d79921 20%; color: #d79921; }
+App.theme-retro #chat-input {
+    background: #1d2021;
+    color: #ebdbb2;
+    border: double #504945;
+    margin: 0 0 1 0;
+}
+App.theme-retro #chat-input:focus { border: double #d79921; }
+App.theme-retro #chat-input .input--placeholder { color: #504945; }
+App.theme-retro #typing-indicator { background: #282828; color: #cc241d; }
+
+
+/* ═══════════════════════════════════════════════════════
+   THEME 5: AURORA
+   Cool dark slate with teal and icy highlights.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-aurora Screen { background: #08131a; color: #d6ecf3; }
+App.theme-aurora Header { background: #0b1b24; color: #4f7480; border-bottom: heavy #69d2e7; }
+
+App.theme-aurora #doc-status-bar { background: #0b1b24; color: #69d2e7; }
+
+App.theme-aurora 
+App.theme-aurora HeaderTitle { color: #9ef0ff; text-style: bold; }
+App.theme-aurora Footer { background: #0b1b24; color: #4f7480; border-top: heavy #69d2e7; }
+App.theme-aurora FooterKey { background: #0b1b24; color: #4f7480; }
+App.theme-aurora FooterKey .footer-key--key { background: #102733; color: #9ef0ff; }
+
+App.theme-aurora #chat-log {
+    background: #08131a;
+    color: #d6ecf3;
+    border: none;
+    scrollbar-color: #102733;
+    scrollbar-color-hover: #2b6570;
+    scrollbar-color-active: #69d2e7;
+}
+
+App.theme-aurora #input-area { background: #08131a; padding: 0 2; }
+App.theme-aurora #cmd-suggest { background: #0b1b24; color: #d6ecf3; }
+App.theme-aurora #cmd-suggest > .option-list--option { color: #d6ecf3; }
+App.theme-aurora #cmd-suggest > .option-list--option-highlighted { background: #69d2e7 20%; color: #9ef0ff; }
+App.theme-aurora #chat-input {
+    background: #0b1b24;
+    color: #eafcff;
+    border: tall #204656;
+    margin: 0 0 1 0;
+}
+App.theme-aurora #chat-input:focus { border: tall #69d2e7; }
+App.theme-aurora #chat-input .input--placeholder { color: #4f7480; }
+App.theme-aurora #typing-indicator { background: #08131a; color: #9ef0ff; }
+
+
+/* ═══════════════════════════════════════════════════════
+   THEME 6: PAPER
+   Soft bright reading theme with ink-like accents.
+   ═══════════════════════════════════════════════════════ */
+
+App.theme-paper Screen { background: #f5f1e8; color: #55493d; }
+App.theme-paper Header { background: #ebe3d6; color: #8e7f6f; border-bottom: solid #d8c7b2; }
+
+App.theme-paper #doc-status-bar { background: #ebe3d6; color: #b06b2d; }
+
+App.theme-paper 
+App.theme-paper HeaderTitle { color: #b06b2d; text-style: bold; }
+App.theme-paper Footer { background: #ebe3d6; color: #8e7f6f; border-top: solid #d8c7b2; }
+App.theme-paper FooterKey { background: #ebe3d6; color: #8e7f6f; }
+App.theme-paper FooterKey .footer-key--key { background: #f8f4ed; color: #8e7f6f; }
+
+App.theme-paper #chat-log {
+    background: #f5f1e8;
+    color: #55493d;
+    border: none;
+    scrollbar-color: #d8c7b2;
+    scrollbar-color-hover: #c1ac94;
+    scrollbar-color-active: #b06b2d;
+}
+
+App.theme-paper #input-area { background: #f5f1e8; padding: 0 2; }
+App.theme-paper #cmd-suggest { background: #ebe3d6; color: #55493d; }
+App.theme-paper #cmd-suggest > .option-list--option { color: #55493d; }
+App.theme-paper #cmd-suggest > .option-list--option-highlighted { background: #b06b2d 20%; color: #8c4f18; }
+App.theme-paper #chat-input {
+    background: #fffaf2;
+    color: #473b31;
+    border: tall #d8c7b2;
+    margin: 0 0 1 0;
+}
+App.theme-paper #chat-input:focus { border: tall #b06b2d; }
+App.theme-paper #chat-input .input--placeholder { color: #8e7f6f; }
+App.theme-paper #typing-indicator { background: #f5f1e8; color: #b06b2d; }
