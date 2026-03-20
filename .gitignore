@@ -39,7 +39,7 @@ probe-*.svg
 src/security_audit_artifacts/
 crimson-voyager-ownership-assessment.md
 implementation_plan.md
-skill/
+skills/
 
 # Archives and local exports
 *.rar
