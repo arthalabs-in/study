@@ -16,6 +16,7 @@ dependencies = [
     "openai>=1.0",
     "tiktoken>=0.8",
     "cryptography>=44.0",
+    "tomli>=2.0; python_version < '3.11'",
     "Pillow>=10.0",
     "rich>=13.0",
 ]

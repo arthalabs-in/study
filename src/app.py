@@ -18,7 +18,6 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -56,6 +55,11 @@ from src.secure_storage import decrypt_text, encrypt_text
 from src.debug_trace import DebugTracer
 from src.study_progress import StudyProgressManager, compute_file_hash
 from src.zotero_webhook import DEFAULT_PORT as DEFAULT_ZOTERO_WEBHOOK_PORT, ZoteroWebhookServer, generate_webhook_secret
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
 
 try:
     import tiktoken
