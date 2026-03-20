@@ -681,11 +681,11 @@ class AgentManager:
             return {"error": f"Calibre search failed: {e}"}
 
     async def _calibre_load(self, book_id: int) -> dict:
+        if int(book_id) <= 0:
+            return {"error": "Calibre book ID must be a positive integer."}
         lib = self._resolve_calibre_library()
         if not lib:
             return {"error": "Calibre library not found."}
-        if int(book_id) <= 0:
-            return {"error": "Calibre book ID must be a positive integer."}
         try:
             pdf_path = calibre_client.get_pdf_path(lib, int(book_id))
         except Exception as e:

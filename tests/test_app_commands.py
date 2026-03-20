@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.app import StudyTUI
@@ -141,7 +142,7 @@ def test_privacy_and_export_privacy_commands() -> None:
     assert StudyTUI._handle_slash_command(app, '/export-privacy private') is True
     assert app._export_privacy == 'private'
     assert app._settings.values['export_privacy'] == 'private'
-    assert str(app._agent_manager.default_export_dir).endswith('.study-tui\\exports')
+    assert Path(app._agent_manager.default_export_dir).parts[-2:] == ('.study-tui', 'exports')
 
 
 def test_privacy_approve_command() -> None:
