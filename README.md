@@ -98,7 +98,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # Linux/macOS
 # or: winget install astral-sh.uv                  # Windows
 
 # Clone and install
-git clone <your-repo-url>
+git clone https://github.com/arthalabs-in/study
 cd crimson-voyager
 uv sync              # installs all deps into an isolated venv
 uv run study-tui     # launch
@@ -117,7 +117,7 @@ uv sync --extra dev    # adds pytest + coverage
 ### Alternative: pip
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/arthalabs-in/study
 cd crimson-voyager
 pip install -e .
 pip install pyzotero          # optional: Zotero integration
