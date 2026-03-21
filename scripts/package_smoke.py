@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import venv
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--method",
         action="append",
-        choices=("uv-run", "uv-install", "pipx-install"),
+        choices=("uv-run", "uv-install", "pipx-install", "venv-install"),
         default=[],
         help="Installation/execution method to verify. Repeat for multiple methods.",
     )
@@ -79,6 +80,12 @@ def _bin_name(name: str) -> str:
     return f"{name}.exe" if os.name == "nt" else name
 
 
+def _venv_paths(root: Path) -> tuple[Path, Path]:
+    scripts_dir = root / ("Scripts" if os.name == "nt" else "bin")
+    python = scripts_dir / _bin_name("python")
+    return python, scripts_dir
+
+
 def smoke_uv_install(wheel: Path) -> None:
     uv = shutil.which("uv")
     if not uv:
@@ -120,6 +127,20 @@ def smoke_pipx_install(wheel: Path) -> None:
             subprocess.run([pipx, "uninstall", "study-tui"], capture_output=True, text=True, env=env)
 
 
+def smoke_venv_install(wheel: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="study-tui-venv-smoke-") as temp_root:
+        root = Path(temp_root)
+        env = _isolated_tool_env(root)
+        venv.EnvBuilder(with_pip=True, system_site_packages=True).create(root / "venv")
+        python, scripts_dir = _venv_paths(root / "venv")
+        run([str(python), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel)], env=env)
+        show = run([str(python), "-m", "pip", "show", "study-tui"], env=env)
+        if "Name: study-tui" not in show.stdout:
+            raise RuntimeError(f"venv install did not register study-tui:\n{show.stdout}")
+        assert_help_output([str(scripts_dir / _bin_name("study")), "--help"], env=env)
+        assert_help_output([str(scripts_dir / _bin_name("study-tui")), "--help"], env=env)
+
+
 def main() -> int:
     args = parse_args()
     wheel = resolve_wheel(args.wheel)
@@ -128,6 +149,7 @@ def main() -> int:
         "uv-run": smoke_uv_run,
         "uv-install": smoke_uv_install,
         "pipx-install": smoke_pipx_install,
+        "venv-install": smoke_venv_install,
     }
     for method in methods:
         runners[method](wheel)

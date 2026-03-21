@@ -46,14 +46,10 @@ jobs:
         if: runner.os == 'Windows'
         run: python -m pip install pipx
 
-      - name: Install uv
-        if: runner.os == 'Linux'
-        run: python -m pip install uv
-
       - name: Packaging smoke (Windows / pipx)
         if: runner.os == 'Windows'
         run: python scripts/package_smoke.py --wheel "dist/*.whl" --method pipx-install
 
-      - name: Packaging smoke (Linux / uv)
+      - name: Packaging smoke (Linux / venv)
         if: runner.os == 'Linux'
-        run: python scripts/package_smoke.py --wheel "dist/*.whl" --method uv-install
+        run: python scripts/package_smoke.py --wheel "dist/*.whl" --method venv-install
