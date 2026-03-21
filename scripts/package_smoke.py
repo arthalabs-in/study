@@ -30,13 +30,19 @@ def resolve_wheel(pattern: str) -> Path:
 
 
 def run(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        text=True,
-        capture_output=True,
-        env=env,
-        check=True,
-    )
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=env,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        output = ((exc.stdout or "") + (exc.stderr or "")).strip()
+        raise RuntimeError(
+            f"Command failed: {' '.join(command)}\n{output}"
+        ) from exc
 
 
 def assert_help_output(command: list[str], env: dict[str, str] | None = None) -> None:
@@ -69,6 +75,10 @@ def _isolated_tool_env(root: Path) -> dict[str, str]:
     return env
 
 
+def _bin_name(name: str) -> str:
+    return f"{name}.exe" if os.name == "nt" else name
+
+
 def smoke_uv_install(wheel: Path) -> None:
     uv = shutil.which("uv")
     if not uv:
@@ -89,15 +99,25 @@ def smoke_pipx_install(wheel: Path) -> None:
     if not pipx:
         raise RuntimeError("pipx is not installed")
 
-    run([pipx, "install", "--force", "--python", sys.executable, str(wheel)])
-    try:
-        show = run([pipx, "runpip", "study-tui", "show", "study-tui"])
-        if "Name: study-tui" not in show.stdout:
-            raise RuntimeError(f"pipx did not install study-tui correctly:\n{show.stdout}")
-        assert_help_output([pipx, "run", "--spec", str(wheel), "study", "--help"])
-        assert_help_output([pipx, "run", "--spec", str(wheel), "study-tui", "--help"])
-    finally:
-        subprocess.run([pipx, "uninstall", "study-tui"], capture_output=True, text=True)
+    with tempfile.TemporaryDirectory(prefix="study-tui-pipx-smoke-") as temp_root:
+        root = Path(temp_root)
+        env = _isolated_tool_env(root)
+        pipx_home = root / "pipx-home"
+        pipx_bin = root / "pipx-bin"
+        pipx_home.mkdir(parents=True, exist_ok=True)
+        pipx_bin.mkdir(parents=True, exist_ok=True)
+        env["PIPX_HOME"] = str(pipx_home)
+        env["PIPX_BIN_DIR"] = str(pipx_bin)
+
+        run([pipx, "install", "--force", "--python", sys.executable, str(wheel)], env=env)
+        try:
+            show = run([pipx, "runpip", "study-tui", "show", "study-tui"], env=env)
+            if "Name: study-tui" not in show.stdout:
+                raise RuntimeError(f"pipx did not install study-tui correctly:\n{show.stdout}")
+            assert_help_output([str(pipx_bin / _bin_name("study")), "--help"], env=env)
+            assert_help_output([str(pipx_bin / _bin_name("study-tui")), "--help"], env=env)
+        finally:
+            subprocess.run([pipx, "uninstall", "study-tui"], capture_output=True, text=True, env=env)
 
 
 def main() -> int:
