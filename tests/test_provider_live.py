@@ -27,6 +27,7 @@ def _skip_unless(condition: bool, reason: str) -> None:
         ("openai", "OPENAI_API_KEY", "LIVE_OPENAI_MODEL", None),
         ("anthropic", "ANTHROPIC_API_KEY", "LIVE_ANTHROPIC_MODEL", None),
         ("gemini", "GEMINI_API_KEY", "LIVE_GEMINI_MODEL", None),
+        ("groq", "GROQ_API_KEY", "LIVE_GROQ_MODEL", None),
         ("kimi", "KIMI_API_KEY", "LIVE_KIMI_MODEL", None),
         ("ollama", None, "LIVE_OLLAMA_MODEL", "LIVE_OLLAMA_BASE_URL"),
         ("llamacpp", None, "LIVE_LLAMACPP_MODEL", "LIVE_LLAMACPP_BASE_URL"),

@@ -34,6 +34,7 @@ gcm-diagnose.log
 Documents/
 /*.pdf
 probe-*.svg
+media/
 
 # Local audit fixtures and planning scratch files
 src/security_audit_artifacts/

@@ -20,6 +20,11 @@ from typing import Any, Awaitable, Callable
 from src.agents.provider import LLMProvider
 from src.agents.tools import ALL_TOOLS, DOCUMENT_TOOLS
 from src.exporter import export_flashcards, export_summary, export_chat
+from src.manim_renderer import (
+    RenderResult,
+    get_animation_dependency_error,
+    render_animation,
+)
 from src.notes import NotesManager
 from src.parsers.doc_store import DocStore
 from src.parsers.image_parser import SUPPORTED_EXTENSIONS as IMG_EXTENSIONS
@@ -50,7 +55,7 @@ class AgentManager:
     chat_history_ref: list | None = None  # reference to app's chat history for export
     flashcards_ref: list | None = None  # most recently generated flashcards for export
     allow_web_tools: bool = False
-    calibre_library: str | pathlib.Path | None = None
+    calibre_library: str | Path | None = None
     request_tool_approval: Callable[[str, dict], Awaitable[bool]] | None = None
     default_export_dir: str | Path | None = None
     progress_manager: StudyProgressManager | None = None
@@ -58,7 +63,7 @@ class AgentManager:
 
     # Supported file extensions for autoloader
     _LOADABLE = {".pdf"} | set(IMG_EXTENSIONS)
-    _APPROVAL_REQUIRED_TOOLS = {"save_note", "export_content"}
+    _APPROVAL_REQUIRED_TOOLS = {"save_note", "export_content", "animate_concept"}
     _ZOTERO_ITEM_KEY_RE = re.compile(r"^[A-Z0-9]{8}$")
 
     async def execute_tool(self, name: str, args: dict) -> Any:
@@ -125,6 +130,8 @@ class AgentManager:
         # Study tools — handled by prompting the model
         elif name in ("generate_flashcards", "generate_quiz", "summarize_document"):
             return await self._study_tool(name, args)
+        elif name == "get_recent_flashcards":
+            return self._get_recent_flashcards(args)
 
         # Autoloader tools
         elif name == "list_available_files":
@@ -191,6 +198,12 @@ class AgentManager:
 
         elif name == "get_review_queue":
             return self._get_review_queue(args.get("doc_id"), args.get("count", 20))
+
+        elif name == "animate_concept":
+            approved = await self._ensure_tool_approval(name, args)
+            if not approved:
+                return {"status": "denied", "error": "User denied approval for animate_concept."}
+            return await self._handle_animate(args)
 
         # Export
         elif name == "export_content":
@@ -349,6 +362,20 @@ class AgentManager:
         )
 
         return {"tool": name, "result": result}
+
+    def _get_recent_flashcards(self, args: dict) -> dict:
+        cards = list(self.flashcards_ref or [])
+        if not cards:
+            return {
+                "error": "No recent flashcards are available in this session yet. Generate flashcards first.",
+                "count": 0,
+            }
+        limit = self._clamp_int(args.get("limit", 20), default=20, minimum=1, maximum=200)
+        return {
+            "count": len(cards[:limit]),
+            "total_count": len(cards),
+            "cards": cards[:limit],
+        }
 
     # ── Autoloader ─────────────────────────────────────────────────
 
@@ -533,13 +560,92 @@ class AgentManager:
         except Exception:
             return
 
+    async def _handle_animate(self, args: dict[str, Any]) -> dict[str, Any]:
+        topic = str(args.get("topic", "")).strip()
+        code = str(args.get("code", "")).strip()
+        quality = str(args.get("quality", "high") or "high").strip().lower()
+        attempt = self._clamp_int(args.get("attempt", 1), default=1, minimum=1, maximum=3)
+
+        if not topic:
+            return {
+                "status": "error",
+                "retryable": False,
+                "attempt": attempt,
+                "error": "Animation topic is required.",
+            }
+        if not code:
+            return {
+                "status": "error",
+                "retryable": False,
+                "attempt": attempt,
+                "error": "Animation code is required.",
+            }
+        if quality not in {"low", "medium", "high"}:
+            quality = "high"
+
+        dependency_error = get_animation_dependency_error()
+        if dependency_error:
+            return {
+                "status": "error",
+                "retryable": False,
+                "attempt": attempt,
+                "topic": topic,
+                "error": dependency_error,
+            }
+
+        result = await render_animation(
+            code,
+            export_dir=self.default_export_dir,
+            quality=quality,
+        )
+        return self._format_animation_result(topic=topic, attempt=attempt, quality=quality, result=result)
+
+    def _format_animation_result(
+        self,
+        *,
+        topic: str,
+        attempt: int,
+        quality: str,
+        result: RenderResult,
+    ) -> dict[str, Any]:
+        if result.success:
+            return {
+                "status": "success",
+                "topic": topic,
+                "attempt": attempt,
+                "retryable": False,
+                "quality": quality,
+                "scene_name": result.scene_name,
+                "duration_seconds": round(float(result.duration_seconds), 2),
+                "video_path": result.video_path,
+                "code_path": result.code_path,
+            }
+
+        preview = (result.stderr or "").strip()
+        if len(preview) > 600:
+            preview = preview[:597] + "..."
+        return {
+            "status": "error",
+            "topic": topic,
+            "attempt": attempt,
+            "retryable": attempt < 3,
+            "quality": quality,
+            "scene_name": result.scene_name,
+            "duration_seconds": round(float(result.duration_seconds), 2),
+            "error": result.error or "Animation render failed.",
+            "stderr_preview": preview or None,
+            "code_path": result.code_path,
+        }
+
     def _handle_export(self, args: dict) -> dict:
         """Route export_content tool calls to the appropriate exporter."""
         export_type = args.get("type", "")
         fmt = args.get("format", "markdown")
         destination = str(args.get("destination", "default_exports"))
+        if destination in {"calibre", "zotero"} and export_type != "notes_pdf":
+            return {"error": "Direct Calibre/Zotero delivery currently supports notes_pdf exports only."}
         export_dir = self.documents_dir if destination == "documents_dir" and self.documents_dir else args.get("export_dir")
-        if not export_dir and destination == "default_exports" and self.default_export_dir:
+        if not export_dir and destination in {"default_exports", "calibre", "zotero"} and self.default_export_dir:
             export_dir = self.default_export_dir
 
         if export_type == "flashcards":
@@ -552,10 +658,11 @@ class AgentManager:
             return self.notes_manager.export_notes_markdown(path=export_dir)
 
         elif export_type == "notes_pdf":
-            return self.notes_manager.export_notes_pdf(
+            result = self.notes_manager.export_notes_pdf(
                 path=export_dir,
                 note_id=args.get("note_id"),
             )
+            return self._deliver_exported_pdf(result, args, destination)
 
         elif export_type == "summary":
             content = args.get("content", "")
@@ -570,6 +677,34 @@ class AgentManager:
             return export_chat(msgs, export_dir=export_dir)
 
         return {"error": f"Unknown export type: {export_type}. Use: flashcards, notes, notes_pdf, summary, chat"}
+
+    def _deliver_exported_pdf(self, result: dict, args: dict, destination: str) -> dict:
+        if "error" in result or destination not in {"calibre", "zotero"}:
+            return result
+        exported = result.get("exported")
+        if not exported:
+            return result
+        pdf_path = Path(str(exported))
+        if destination == "calibre":
+            book_id = self._clamp_int(args.get("calibre_book_id"), default=0, minimum=0, maximum=10**9)
+            if book_id <= 0:
+                return {"error": "destination=calibre requires calibre_book_id for the target book.", "exported": str(pdf_path)}
+            library = self._resolve_calibre_library()
+            if not library:
+                return {"error": "Calibre library not found. Configure the Calibre library path first.", "exported": str(pdf_path)}
+            delivery = calibre_client.attach_exported_pdf(library, book_id, pdf_path)
+            if "error" in delivery:
+                delivery["exported"] = str(pdf_path)
+                return delivery
+            return {**result, "delivery": "calibre", "calibre": delivery}
+        zotero_item_key = str(args.get("zotero_item_key", "")).strip().upper()
+        if not self._ZOTERO_ITEM_KEY_RE.fullmatch(zotero_item_key):
+            return {"error": "destination=zotero requires a valid zotero_item_key.", "exported": str(pdf_path)}
+        delivery = zotero_client.attach_exported_pdf(zotero_item_key, pdf_path)
+        if "error" in delivery:
+            delivery["exported"] = str(pdf_path)
+            return delivery
+        return {**result, "delivery": "zotero", "zotero": delivery}
 
 
     async def _ensure_tool_approval(self, name: str, args: dict) -> bool:
@@ -602,6 +737,14 @@ class AgentManager:
             suffix = f" ({', '.join(details)})" if details else ""
             return f"💾 Requesting approval to export {export_type} as {fmt}{suffix}..."
 
+        if name == "animate_concept":
+            topic = self._truncate(str(args.get("topic", "concept")), 48)
+            attempt = self._clamp_int(args.get("attempt", 1), default=1, minimum=1, maximum=3)
+            quality = str(args.get("quality", "high") or "high").strip().lower()
+            if attempt <= 1:
+                return f"🎬 Rendering animation for \"{topic}\" ({quality}, attempt 1/3)..."
+            return f"⚠️ Render failed, retrying animation for \"{topic}\" ({quality}, attempt {attempt}/3)..."
+
         labels = {
             "search_chunks": lambda a: f"Searching documents for \"{a.get('query', '')}\"...",
             "get_chunk_by_id": lambda a: f"Reading chunk {a.get('chunk_id', '')}...",
@@ -612,6 +755,7 @@ class AgentManager:
             "generate_flashcards": lambda a: f"Creating {a.get('count', '')} flashcards on \"{a.get('topic', '')}\"...",
             "generate_quiz": lambda a: f"Generating {a.get('difficulty', '')} quiz on \"{a.get('topic', '')}\"...",
             "summarize_document": lambda a: f"Summarizing {a.get('doc_id', a.get('section', 'document'))}...",
+            "get_recent_flashcards": lambda a: "Loading the latest generated flashcards...",
             "list_available_files": lambda a: "Browsing available files...",
             "load_file": lambda a: f"Loading {Path(str(a.get('file_path', a.get('relative_path', '')))).name or a.get('file_path', a.get('relative_path', ''))}...",
             "web_search": lambda a: f"Searching the web for \"{a.get('query', '')}\"...",
@@ -654,10 +798,10 @@ class AgentManager:
 
     # ── Calibre helpers ────────────────────────────────────────────────────
 
-    def _resolve_calibre_library(self) -> pathlib.Path | None:
+    def _resolve_calibre_library(self) -> Path | None:
         """Return configured calibre library path, or auto-detect."""
         if self.calibre_library:
-            p = pathlib.Path(self.calibre_library)
+            p = Path(self.calibre_library)
             if (p / "metadata.db").exists():
                 return p
         return calibre_client.find_calibre_library()

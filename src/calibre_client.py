@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -127,3 +129,64 @@ def get_pdf_path(library_path: Path, book_id: int) -> Path | None:
         return pdf if pdf.is_file() else None
     finally:
         conn.close()
+
+
+def _candidate_calibredb_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    for env_key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        root = os.environ.get(env_key)
+        if not root:
+            continue
+        base = Path(root)
+        candidates.extend(
+            [
+                base / "Calibre2",
+                base / "Programs" / "Calibre2",
+            ]
+        )
+    return [path for path in candidates if path.exists()]
+
+
+def _find_calibredb() -> str | None:
+    found = shutil.which("calibredb")
+    if found:
+        return found
+    binary_name = "calibredb.exe" if os.name == "nt" else "calibredb"
+    for directory in _candidate_calibredb_dirs():
+        candidate = directory / binary_name
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def attach_exported_pdf(library_path: Path, book_id: int, pdf_path: Path) -> dict:
+    """Attach or replace the PDF format for an existing Calibre book."""
+    if book_id <= 0:
+        return {"error": "Calibre book ID must be a positive integer."}
+    if not pdf_path.is_file():
+        return {"error": "Exported PDF file was not found."}
+    if not library_path.is_dir() or not (library_path / "metadata.db").is_file():
+        return {"error": "Calibre library was not found."}
+
+    calibredb = _find_calibredb()
+    if not calibredb:
+        return {"error": "calibredb is required to export directly to Calibre. Install Calibre and keep calibredb on PATH."}
+
+    cmd = [
+        calibredb,
+        "add_format",
+        str(book_id),
+        str(pdf_path),
+        "--library-path",
+        str(library_path),
+    ]
+    completed = subprocess.run(cmd, capture_output=True, text=True)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return {"error": detail or "Failed to attach PDF to Calibre."}
+    return {
+        "status": "attached",
+        "book_id": book_id,
+        "path": str(pdf_path),
+        "library_path": str(library_path),
+    }

@@ -43,6 +43,7 @@ SLASH_COMMANDS = [
     ("/review",     "Review saved flashcards"),
     ("/flashcards", "Generate flashcards"),
     ("/summary",    "Summarize loaded files"),
+    ("/animate",    "Render a concept animation"),
     ("/q",          "Quote paragraphs from last response"),
     ("/theme",      "Pick or switch UI theme"),
     ("/web",        "Pick web search state"),
@@ -153,8 +154,8 @@ def _md_line(line: str, prefix: str = "  │ ") -> Text:
     return t
 
 def _parse_flashcards(text: str) -> tuple[list[str], list[tuple[str, str]], list[str]] | None:
-    marker_match = re.search(r"(?is)\[flashcards\](.*?)\[/flashcards\]", text)
-    if marker_match:
+    marker_matches = list(re.finditer(r"(?is)\[flashcards\](.*?)\[/flashcards\]", text))
+    for marker_match in reversed(marker_matches):
         intro_lines = [line.rstrip() for line in text[:marker_match.start()].splitlines() if line.strip()]
         outro_lines = [line.rstrip() for line in text[marker_match.end():].splitlines() if line.strip()]
         parsed_inside = _parse_flashcards(marker_match.group(1).strip())
@@ -441,6 +442,7 @@ class ChatView(Widget):
             ("- /review      ", "Review saved flashcards"),
             ("- /flashcards  ", "Generate flashcards"),
             ("- /summary     ", "Summarize loaded files"),
+            ("- /animate     ", "Render a concept animation"),
             ("- /q [N] [N-M] ", "Quote paragraphs from last response"),
             ("- /theme      ", "Pick or switch UI theme"),
             ("- /web        ", "Pick web search state"),

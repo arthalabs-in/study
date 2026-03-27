@@ -71,9 +71,9 @@ Quick links: [Features](#features) · [Install](#install) · [First Run](#first-
 - **Token tracking** — real-time visibility into prompt/completion token usage
 
 ### 🔐 Provider Flexibility
-- **8 providers** supported out of the box
+- **9 providers** supported out of the box
 - **3 local** (Ollama, llama.cpp, LM Studio) for privacy-first workflows
-- **5 API** (OpenAI, Anthropic, Gemini, Kimi, OpenAI Codex via ChatGPT OAuth) for maximum capability
+- **6 remote** (OpenAI, Anthropic, Gemini, Groq, Kimi, OpenAI Codex via ChatGPT OAuth) for maximum capability
 - Secure API key storage via system keyring
 - Hot-swap providers and models mid-session
 
@@ -99,7 +99,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # Linux/macOS
 
 # Clone and install
 git clone https://github.com/arthalabs-in/study
-cd crimson-voyager
+cd study
 uv sync              # installs all deps into an isolated venv
 uv run study-tui     # launch
 ```
@@ -118,7 +118,7 @@ uv sync --extra dev    # adds pytest + coverage
 
 ```bash
 git clone https://github.com/arthalabs-in/study
-cd crimson-voyager
+cd study
 pip install -e .
 pip install pyzotero          # optional: Zotero integration
 pip install -e ".[anki]"      # optional: Anki export
@@ -127,7 +127,13 @@ pip install -e ".[anki]"      # optional: Anki export
 ### Run
 
 ```bash
+study                         # launch via short entrypoint
 study-tui                     # launch
+study provider                # list providers
+study model list              # list models for current provider
+study status                  # show current setup summary
+study doctor                  # diagnose auth + runtime + deps
+study setup                   # run the interactive setup wizard
 study-tui path/to/notes.pdf   # open a document immediately
 study-tui --setup             # run the interactive setup wizard first
 ```
@@ -139,10 +145,17 @@ study-tui --setup             # run the interactive setup wizard first
 ### `--setup` wizard (recommended for new users)
 
 ```bash
-uv run study-tui --setup
+uv run study setup
 ```
 
-Walks you through picking a provider, entering an API key, and setting your default documents folder. Settings are saved to `~/.study-tui/settings.json` and the app launches automatically afterwards.
+Walks you through picking a provider, setting auth, choosing a model, selecting the default documents folder, configuring Calibre, enabling the Zotero webhook, and checking Manim / TeX animation readiness. Settings are saved to `~/.study-tui/settings.json`, secrets go to `~/.study-tui/secrets.json`, and `study --setup` still launches the app automatically afterwards.
+
+API-key providers supported in the setup wizard:
+- `openai` via `OPENAI_API_KEY`
+- `anthropic` via `ANTHROPIC_API_KEY`
+- `gemini` via `GEMINI_API_KEY`
+- `groq` via `GROQ_API_KEY`
+- `kimi` via `KIMI_API_KEY`
 
 ### Option A: Local model (private, free)
 
@@ -159,11 +172,43 @@ study-tui                      # launch
 /provider openai               # activate the provider
 ```
 
+Groq works the same way:
+
+```text
+/key groq:gsk_...              # set your Groq API key
+/provider groq                 # activate Groq
+```
+
 ### Option C: ChatGPT OAuth (Codex)
 
 ```text
 /provider openai-codex         # uses ChatGPT OAuth, no API key needed
 ```
+
+---
+
+## CLI Commands
+
+Study TUI also supports a small non-interactive CLI for setup and diagnostics:
+
+```bash
+study provider
+study provider groq
+study model list
+study model list groq
+study model use groq:llama-3.3-70b-versatile
+study status
+study doctor
+study setup
+```
+
+- `study provider` lists providers and auth status
+- `study provider <name>` switches the default provider and resets the model to that provider's default
+- `study model list [provider]` lists models for the current or requested provider
+- `study model use <provider:model>` saves the default provider/model pair
+- `study status` shows the current configured provider, model, folders, auth mode, and animation readiness
+- `study doctor` diagnoses config, auth, Python runtime, and key dependencies like Manim, LaTeX, and `dvisvgm`
+- `study setup` is the same interactive wizard as `study --setup`
 
 ---
 
@@ -234,6 +279,7 @@ study-tui                      # launch
 | Kimi K2.5 | API | API key | `/provider kimi` |
 | Anthropic (Claude) | API | API key | `/provider anthropic` |
 | OpenAI API | API | API key | `/provider openai` |
+| Groq | API | API key | `/provider groq` |
 | OpenAI Codex | API | ChatGPT OAuth | `/provider openai-codex` |
 | Google Gemini | API | API key | `/provider gemini` |
 | Ollama | Local | None | `/provider ollama` |

@@ -436,12 +436,26 @@ def make_app() -> tuple[StudyTUI, FakeChat, FakeHistory, list]:
     app._last_context_stats = {}
     app._last_tool_result_chars = 0
     app._last_context_limit = None
+    app._tool_artifacts = []
+    app._request_turn_index = 0
+    app._active_request_turn_index = 0
+    app._last_selected_tools = []
+    app._last_tool_schema_tokens = 0
+    app._last_dropped_artifact_count = 0
+    app._last_request_system_prompt = app_module.SYSTEM_PROMPT
     app._doc_source_hashes = {}
     app._latest_source_hash = None
+    app._pending_study_workflow = None
     app._resolve_api_key = lambda provider: ''
     app._init_provider = lambda: None
     app._documents_loaded = lambda: bool(app.doc_store.documents)
     app._provider_is_remote = lambda: True
+    app._current_prompt_turn_index = lambda: app._active_request_turn_index or app._request_turn_index
+    app._tool_lookup = lambda: {
+        str(tool.get('name', '')).strip(): tool
+        for tool in app_module.ALL_TOOLS
+        if str(tool.get('name', '')).strip()
+    }
     app.query_one = lambda *args, **kwargs: chat
     def _run_worker(work, **kwargs):
         name = getattr(getattr(work, 'cr_code', None), 'co_name', repr(work))
@@ -749,7 +763,7 @@ async def test_request_and_resolve_pending_tool_approval() -> None:
     await asyncio.sleep(0)
     pending = app._pending_tool_approval
     assert pending is not None
-    assert 'Approval required before writing to disk.' in chat.system_messages[0]
+    assert 'Approval required before writing to disk or running a local render.' in chat.system_messages[0]
     assert chat.pickers[-1][0] == 'Resolve this write request.'
     assert chat.pickers[-1][1][0][2] == '/approve'
     assert chat.pickers[-1][1][1][2] == '/deny'
@@ -841,6 +855,9 @@ def test_handle_slash_commands_cover_primary_branches(tmp_path, monkeypatch) -> 
 
     assert StudyTUI._handle_slash_command(app, '/help') is True
     assert chat.welcome_written is True
+
+    assert StudyTUI._handle_slash_command(app, '/animate') is True
+    assert workers[-1][0].name == '_run_study_action'
 
     assert StudyTUI._handle_slash_command(app, '/load') is True
     assert workers[-1][0].name == '_pick_and_load_file'
@@ -947,7 +964,10 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
 
     event = SimpleNamespace(score=1, total=2, results=[{'question': 'A', 'correct': False, 'user_answer': 'x', 'expected_answer': 'y'}])
     await StudyTUI.on_chat_view_quiz_finished(app, event)
-    assert app._chat_history[-2]['role'] == 'user'
+    assert any(
+        msg['role'] == 'user' and '[System context' in msg['content']
+        for msg in app._chat_history
+    )
 
     app._chat_history = [{'role': 'user', 'content': 'hello'}]
     app._provider = FakeProvider()
@@ -1030,6 +1050,101 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
     assert chat.tool_done[-1] == 'Generated 1 questions'
     assert app._chat_history[-1]['content'] == '[QUIZ SESSION STARTED] Generated 1 interactive questions.'
     assert ''.join(chat.response_tokens) == ''
+
+    chat.response_tokens.clear()
+    start_response_before_tool_flashcards = chat.start_response_calls
+
+    async def agentic_flashcard_stream(**kwargs):
+        deck = (
+            "Here are some flashcards to reinforce the weak points:\n\n"
+            "[FLASHCARDS]\n"
+            "Q: What is heat?\n"
+            "A: Heat is energy transferred due to a temperature difference.\n\n"
+            "Q: What is thermal equilibrium?\n"
+            "A: It is the state where no net heat flows.\n"
+            "[/FLASHCARDS]\n\n"
+            "If you want, I can make a harder set next."
+        )
+        kwargs['on_tool_result'](
+            'generate_flashcards',
+            {
+                'tool': 'generate_flashcards',
+                'result': deck,
+            },
+        )
+        kwargs['on_text'](deck)
+        return deck
+
+    monkeypatch.setattr(app_module, 'stream_chat', agentic_flashcard_stream)
+    await StudyTUI._run_generation(app)
+    assert chat.started_flashcards
+    cards, intro_lines, outro_lines = chat.started_flashcards[-1]
+    assert cards[0]['question'] == 'What is heat?'
+    assert intro_lines == ['Here are some flashcards to reinforce the weak points:']
+    assert outro_lines == ['If you want, I can make a harder set next.']
+    assert chat.tool_done[-1] == 'Generated 2 flashcards'
+    assert ''.join(chat.response_tokens) == ''
+    assert chat.start_response_calls == start_response_before_tool_flashcards
+
+    chat.response_tokens.clear()
+
+    async def tool_first_flashcard_stream(**kwargs):
+        kwargs['on_tool_call'](
+            'generate_flashcards',
+            {
+                'topic': 'weak points',
+                'count': 6,
+            },
+        )
+        deck = (
+            "Here are some flashcards to reinforce the points you missed:\n\n"
+            "[FLASHCARDS]\n"
+            "Q: What is heat?\n"
+            "A: Heat is energy transferred due to a temperature difference.\n\n"
+            "Q: What is thermal equilibrium?\n"
+            "A: It is the state where no net heat flows.\n"
+            "[/FLASHCARDS]\n\n"
+            "If you want, I can make a harder set next."
+        )
+        kwargs['on_text'](deck)
+        return deck
+
+    monkeypatch.setattr(app_module, 'stream_chat', tool_first_flashcard_stream)
+    await StudyTUI._run_generation(app)
+    assert chat.started_flashcards
+    cards, intro_lines, outro_lines = chat.started_flashcards[-1]
+    assert cards[0]['question'] == 'What is heat?'
+    assert intro_lines == ['Here are some flashcards to reinforce the points you missed:']
+    assert outro_lines == ['If you want, I can make a harder set next.']
+    assert ''.join(chat.response_tokens) == ''
+    assert chat.start_response_calls == start_response_before_tool_flashcards
+
+    chat.response_tokens.clear()
+
+    async def animation_stream(**kwargs):
+        kwargs['on_tool_result'](
+            'animate_concept',
+            {
+                'status': 'success',
+                'topic': 'Units and Measurement',
+                'attempt': 1,
+                'retryable': False,
+                'quality': 'low',
+                'scene_name': 'UnitsScene',
+                'duration_seconds': 1.2,
+                'video_path': 'C:/exports/units.mp4',
+                'code_path': 'C:/exports/units.py',
+            },
+        )
+        kwargs['on_text']('Animation rendered successfully.')
+        return 'Animation rendered successfully.'
+
+    monkeypatch.setattr(app_module, 'stream_chat', animation_stream)
+    await StudyTUI._run_generation(app)
+    assert chat.tool_done[-1] == 'Rendered animation for Units and Measurement.'
+    assert chat.info_blocks[-1][0] == 'Animation'
+    assert any('Video: C:/exports/units.mp4' in line for line in chat.info_blocks[-1][1])
+    assert app._chat_history[-1]['content'].startswith('[ANIMATION RENDERED]')
 
     async def cancel_stream(**kwargs):
         raise asyncio.CancelledError()
@@ -1222,6 +1337,8 @@ async def test_usage_reports_session_tokens_and_context_limit() -> None:
     app._chat_history = [{'role': 'user', 'content': 'Explain entropy simply.'}]
     app._session_prompt_tokens = 120
     app._session_completion_tokens = 45
+    app._last_selected_tools = ['list_documents', 'search_chunks']
+    app._last_tool_schema_tokens = 321
 
     async def fake_context_window():
         return 128000
@@ -1237,6 +1354,8 @@ async def test_usage_reports_session_tokens_and_context_limit() -> None:
     assert 'Context window' in joined
     assert 'Remaining before limit' in joined
     assert 'Compact memory blocks' in joined
+    assert 'Selected tools in latest request' in joined
+    assert 'Latest tool-schema tokens' in joined
 
 
 @pytest.mark.asyncio
@@ -1248,6 +1367,20 @@ async def test_context_reports_prompt_state_breakdown() -> None:
     ]
     app._compact_memories = [{'id': 'mem_1', 'summary': 'Older thermodynamics discussion', 'source_count': 4}]
     app._compacted_transcript_count = 1
+    app._tool_artifacts = [
+        {
+            'tool_name': 'list_documents',
+            'turn_index': 1,
+            'retention_class': 'ephemeral',
+            'full_payload': [{'doc_id': 'doc1', 'title': 'Thermo'}],
+            'gist_payload': 'Loaded documents (1): Thermo',
+            'category': 'tool_listing',
+            'source_refs': ['doc1'],
+        }
+    ]
+    app._request_turn_index = 2
+    app._last_selected_tools = ['list_documents', 'search_chunks']
+    app._last_tool_schema_tokens = 456
 
     async def fake_context_window():
         return 32000
@@ -1260,8 +1393,178 @@ async def test_context_reports_prompt_state_breakdown() -> None:
     joined = '\n'.join(lines)
     assert 'Transcript messages' in joined
     assert 'Compact memory blocks' in joined
+    assert 'Retained tool artifacts' in joined
+    assert 'Selected tools in latest request' in joined
     assert 'Category pressure:' in joined
     assert 'Largest contributors' in joined
+
+
+def test_select_tools_returns_persistent_full_toolset() -> None:
+    app, _chat, _history, _workers = make_app()
+    selected = StudyTUI._select_tools(app, "animate the concept and export to anki", flow="animate")
+    names = [tool['name'] for tool in selected]
+    assert 'animate_concept' in names
+    assert 'get_study_progress' in names
+    assert 'export_content' in names
+    assert 'pomodoro_start' in names
+    assert 'zotero_search' in names
+    assert 'calibre_search' in names
+    assert 'spawn_subagent' in names
+
+
+def test_select_tools_keeps_core_study_tools_available() -> None:
+    app, _chat, _history, _workers = make_app()
+    selected = StudyTUI._select_tools(app, "load keph101", flow="chat")
+    names = [tool["name"] for tool in selected]
+    assert "generate_quiz" in names
+    assert "generate_flashcards" in names
+    assert "summarize_document" in names
+    assert "get_study_progress" in names
+    assert "get_review_queue" in names
+    assert "animate_concept" in names
+    assert "search_notes" in names
+    assert "pomodoro_start" in names
+    assert "export_content" in names
+
+
+def test_select_tools_keeps_animation_for_confirmation_turns() -> None:
+    app, _chat, _history, _workers = make_app()
+    app._append_turn("assistant", "Would you like me to generate the animation now?")
+    selected = StudyTUI._select_tools(app, "yes", flow="chat")
+    names = [tool["name"] for tool in selected]
+    assert "animate_concept" in names
+
+
+def test_select_tools_keeps_animation_for_loaded_followup_turns() -> None:
+    app, _chat, _history, _workers = make_app()
+    app._append_turn("user", "load keph102, and please animate the difference of velocity and speed")
+    app._append_turn("assistant", "I can animate that once the document is loaded.")
+    selected = StudyTUI._select_tools(app, "it is loaded", flow="chat")
+    names = [tool["name"] for tool in selected]
+    assert "animate_concept" in names
+
+
+def test_note_tool_result_persists_ephemeral_artifact() -> None:
+    app, _chat, _history, _workers = make_app()
+    app._active_request_turn_index = 1
+
+    StudyTUI._note_tool_result(
+        app,
+        'list_documents',
+        [{'doc_id': 'doc1', 'title': 'Thermo'}],
+    )
+
+    assert app._tool_artifacts
+    assert app._tool_artifacts[0]['tool_name'] == 'list_documents'
+    assert app._tool_artifacts[0]['retention_class'] == 'ephemeral'
+
+
+def test_note_tool_result_keeps_chunk_context_stable_and_deduped_for_chat() -> None:
+    app, _chat, _history, _workers = make_app()
+    app._active_request_turn_index = 1
+
+    StudyTUI._note_tool_result(
+        app,
+        'get_chunk_by_id',
+        {'chunk_id': 'doc1_c1', 'doc_id': 'doc1', 'page': 3, 'text': 'Velocity is displacement over time.'},
+    )
+    StudyTUI._note_tool_result(
+        app,
+        'get_chunk_by_id',
+        {'chunk_id': 'doc1_c1', 'doc_id': 'doc1', 'page': 3, 'text': 'Velocity is displacement over time.'},
+    )
+
+    assert len(app._tool_artifacts) == 1
+    assert app._tool_artifacts[0]['retention_class'] == 'conversation'
+
+
+def test_select_tools_keeps_library_fallback_tools_for_load_followup_workflow() -> None:
+    app, _chat, _history, _workers = make_app()
+    StudyTUI._mark_pending_study_workflow(app, "load keph102, and please animate the difference of velocity and speed")
+    app._append_turn("assistant", "I don't see keph102 in the current documents folder yet.")
+    selected = StudyTUI._select_tools(app, "yes", flow="chat")
+    names = [tool["name"] for tool in selected]
+    assert "calibre_search" in names
+    assert "calibre_load" in names
+    assert "zotero_search" in names
+    assert "zotero_load" in names
+    assert "zotero_collections" in names
+
+
+def test_system_prompt_for_tools_loads_animation_skill_only_for_animation(monkeypatch) -> None:
+    app, _chat, _history, _workers = make_app()
+    selected = StudyTUI._select_tools(app, "animate velocity", flow="animate")
+    plain = StudyTUI._system_prompt_for_tools(app, selected)
+    monkeypatch.setattr(app_module, "_load_manim_skill_guidance", lambda: "SKILL BODY")
+    animation_prompt = StudyTUI._system_prompt_for_tools(app, selected, include_animation_skill=True)
+    assert "Tool availability for this request:" in plain
+    assert "The complete persistent toolset for this conversation is available on this request:" in plain
+    assert "Animation-specific execution guidance:" not in plain
+    assert "references/manim-design-patterns.md" not in animation_prompt
+    assert animation_prompt == plain + "\nWhen animate_concept is available, follow this compact animation guidance before producing code.\n\nSKILL BODY"
+    assert "TeX" in app_module.SYSTEM_PROMPT
+
+
+def test_system_prompt_for_tools_describes_persistent_toolset() -> None:
+    app, _chat, _history, _workers = make_app()
+    selected = StudyTUI._select_tools(app, "load keph101", flow="chat")
+    prompt = StudyTUI._system_prompt_for_tools(app, selected)
+    assert "animate_concept" in [tool["name"] for tool in selected]
+    assert "Animation-specific execution guidance:" not in prompt
+    assert "Never invent or call a tool that is not present in request.tools." in prompt
+    assert "The complete persistent toolset for this conversation is available on this request:" in prompt
+    assert "The host keeps this toolset available across follow-up turns" in prompt
+    assert "unavailable on this turn" not in prompt
+
+
+def test_system_prompt_for_tools_includes_pending_workflow() -> None:
+    app, _chat, _history, _workers = make_app()
+    StudyTUI._mark_pending_study_workflow(app, "load keph102, and please animate the difference of velocity and speed")
+    selected = StudyTUI._select_tools(app, "yes", flow="chat")
+    prompt = StudyTUI._system_prompt_for_tools(app, selected)
+    assert "Pending workflow: load_then_animate." in prompt
+    assert "Original request to preserve across follow-ups:" in prompt
+
+
+def test_pending_workflow_prompt_message_is_internal_system_context() -> None:
+    app, _chat, _history, _workers = make_app()
+    StudyTUI._mark_pending_study_workflow(app, "load keph102 and animate the difference between speed and velocity")
+    msg = StudyTUI._pending_workflow_prompt_message(app)
+    assert msg is not None
+    assert msg["role"] == "system"
+    assert "pending study workflow" in msg["content"].lower()
+    assert "load_then_animate" in msg["content"]
+
+
+def test_mark_pending_workflow_clears_on_clear_pivot() -> None:
+    app, _chat, _history, _workers = make_app()
+    StudyTUI._mark_pending_study_workflow(app, "load keph102 and animate velocity")
+    assert app._pending_study_workflow is not None
+    StudyTUI._mark_pending_study_workflow(app, "save a note about entropy")
+    assert app._pending_study_workflow is None
+
+
+@pytest.mark.asyncio
+async def test_animate_study_action_uses_animation_skill_prompt(monkeypatch) -> None:
+    app, chat, _history, _workers = make_app()
+    doc = Document(id='doc1', title='Physics', path='physics.pdf', total_pages=1, chunks=[Chunk(id='c1', doc_id='doc1', page=1, text='text', summary='sum')])
+    app.doc_store.add_document(doc)
+    app._privacy_mode = 'standard'
+    app._remote_docs_approved = True
+    app._provider = FakeProvider(chat_result='Animation request accepted.')
+    monkeypatch.setattr(app_module, "_load_manim_skill_guidance", lambda: "MANIM SKILL CONTENT")
+    seen = {}
+
+    async def fake_stream_chat(**kwargs):
+        seen['system'] = kwargs['system']
+        return 'Animation request accepted.'
+
+    monkeypatch.setattr(app_module, 'stream_chat', fake_stream_chat)
+    await StudyTUI._run_study_action(app, 'animate', user_request='animate vectors')
+
+    assert app._provider.chat_calls == []
+    assert 'MANIM SKILL CONTENT' in seen['system']
+    assert 'MANIM SKILL CONTENT' in app._last_request_system_prompt
 
 
 @pytest.mark.asyncio
@@ -1310,9 +1613,33 @@ def test_system_prompt_guides_tool_use_and_latex() -> None:
     assert 'use list_available_files first, then load_file with the returned relative_path' in app_module.SYSTEM_PROMPT
     assert 'If the user asks what notes already exist, use list_notes or search_notes instead of guessing.' in app_module.SYSTEM_PROMPT
     assert 'keep the formulas as LaTeX so the app can render and export them well' in app_module.SYSTEM_PROMPT
-    assert 'They do NOT need to type /flashcards, /quiz, or /summary.' in app_module.SYSTEM_PROMPT
+    assert 'They do NOT need to type /flashcards, /quiz, /summary, or /animate.' in app_module.SYSTEM_PROMPT
     assert 'handle it end-to-end' in app_module.SYSTEM_PROMPT
     assert 'format=anki to create an .apkg package' in app_module.SYSTEM_PROMPT
+    assert 'Use animate_concept when the user asks to animate' in app_module.SYSTEM_PROMPT
+    assert '60-90 seconds' in app_module.SYSTEM_PROMPT
+    assert 'overlapping text blocks' in app_module.SYSTEM_PROMPT
+
+
+@pytest.mark.asyncio
+async def test_quiz_and_review_offer_animation_suggestions() -> None:
+    app, chat, _history, _workers = make_app()
+    doc = Document(id='doc1', title='Physics', path='physics.pdf', total_pages=1, chunks=[Chunk(id='c1', doc_id='doc1', page=1, text='text', summary='sum')])
+    app.doc_store.add_document(doc)
+    app._doc_source_hashes['doc1'] = 'hash-doc1'
+    app._latest_source_hash = 'hash-doc1'
+
+    quiz_event = SimpleNamespace(
+        score=1,
+        total=3,
+        results=[{'question': 'Q1', 'correct': False, 'user_answer': 'x', 'expected_answer': 'y'}],
+    )
+    await StudyTUI.on_chat_view_quiz_finished(app, quiz_event)
+    assert any('animate weak topic' in msg.lower() for msg in chat.assistant_messages)
+
+    review_event = SimpleNamespace(total=4, grades={'again': 2, 'hard': 1, 'good': 1, 'easy': 0})
+    await StudyTUI.on_chat_view_flashcard_review_finished(app, review_event)
+    assert any('animate weak topic' in msg.lower() for msg in chat.assistant_messages)
 
 
 def test_on_tool_status_suppresses_immediate_duplicate() -> None:

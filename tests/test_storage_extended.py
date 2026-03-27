@@ -409,3 +409,140 @@ def test_notes_export_pdf_renders_latex_without_unicode_font(tmp_path: Path, mon
     assert "sum _i=_1^3 x_i" in rendered
     manager.close()
 
+
+def test_notes_export_pdf_renders_standalone_latex_blocks_as_images(tmp_path: Path, monkeypatch) -> None:
+    manager = NotesManager(tmp_path / "notes.db")
+    manager.save_note("Electrostatics", "$$E = mc^2$$")
+
+    pdf_module = type(sys)("fpdf")
+    capture: dict[str, object] = {}
+    image_path = tmp_path / "equation.png"
+    image_path.write_bytes(b"png")
+
+    class FakeFPDF:
+        def __init__(self):
+            self.lines = []
+            capture["pdf"] = self
+
+        def add_font(self, *args, **kwargs):
+            self.lines.append(("add_font", args, kwargs))
+
+        def set_auto_page_break(self, **kwargs):
+            self.lines.append(("page_break", kwargs))
+
+        def add_page(self):
+            self.lines.append(("page", None))
+
+        def set_font(self, *args, **kwargs):
+            self.lines.append(("font", args, kwargs))
+
+        def cell(self, *args, **kwargs):
+            self.lines.append(("cell", args, kwargs))
+
+        def ln(self, *args, **kwargs):
+            self.lines.append(("ln", args, kwargs))
+
+        def multi_cell(self, *args, **kwargs):
+            self.lines.append(("multi", args, kwargs))
+
+        def image(self, *args, **kwargs):
+            self.lines.append(("image", args, kwargs))
+
+        def set_draw_color(self, *args, **kwargs):
+            self.lines.append(("draw", args, kwargs))
+
+        def line(self, *args, **kwargs):
+            self.lines.append(("line", args, kwargs))
+
+        def get_y(self):
+            return 42
+
+        def output(self, path):
+            Path(path).write_text("pdf", encoding="utf-8")
+
+    pdf_module.FPDF = FakeFPDF
+    monkeypatch.setitem(sys.modules, "fpdf", pdf_module)
+    monkeypatch.setattr(notes_module.NotesManager, "_render_latex_block_image", classmethod(lambda cls, latex, display: image_path))
+
+    result = manager.export_notes_pdf(path=str(tmp_path / "exports"))
+    assert result["format"] == "pdf"
+    rendered = "\n".join(str(item) for item in capture["pdf"].lines)
+    assert "image" in rendered
+    manager.close()
+
+
+def test_notes_export_pdf_resets_cursor_after_latex_image(tmp_path: Path, monkeypatch) -> None:
+    manager = NotesManager(tmp_path / "notes.db")
+    manager.save_note("Electrostatics", "$$E = mc^2$$\nFollow-up explanation text.")
+
+    pdf_module = type(sys)("fpdf")
+    capture: dict[str, object] = {}
+    image_path = tmp_path / "equation.png"
+    image_path.write_bytes(b"png")
+
+    class FakeFPDF:
+        def __init__(self):
+            self.lines = []
+            self.l_margin = 10
+            self.r_margin = 10
+            self.w = 210
+            self.x = self.l_margin
+            capture["pdf"] = self
+
+        def add_font(self, *args, **kwargs):
+            self.lines.append(("add_font", args, kwargs))
+
+        def set_auto_page_break(self, **kwargs):
+            self.lines.append(("page_break", kwargs))
+
+        def add_page(self):
+            self.lines.append(("page", None))
+
+        def set_font(self, *args, **kwargs):
+            self.lines.append(("font", args, kwargs))
+
+        def cell(self, *args, **kwargs):
+            self.lines.append(("cell", args, kwargs))
+            self.x = self.l_margin
+
+        def ln(self, *args, **kwargs):
+            self.lines.append(("ln", args, kwargs))
+            self.x = self.l_margin
+
+        def set_x(self, value):
+            self.x = value
+            self.lines.append(("set_x", value))
+
+        def multi_cell(self, width, *args, **kwargs):
+            if width <= 0:
+                raise RuntimeError("Not enough horizontal space to render a single character")
+            self.lines.append(("multi", width, args, kwargs))
+            self.x = self.l_margin
+
+        def image(self, *args, **kwargs):
+            self.lines.append(("image", args, kwargs))
+            self.x = 205
+
+        def set_draw_color(self, *args, **kwargs):
+            self.lines.append(("draw", args, kwargs))
+
+        def line(self, *args, **kwargs):
+            self.lines.append(("line", args, kwargs))
+
+        def get_y(self):
+            return 42
+
+        def output(self, path):
+            Path(path).write_text("pdf", encoding="utf-8")
+
+    pdf_module.FPDF = FakeFPDF
+    monkeypatch.setitem(sys.modules, "fpdf", pdf_module)
+    monkeypatch.setattr(notes_module.NotesManager, "_render_latex_block_image", classmethod(lambda cls, latex, display: image_path))
+
+    result = manager.export_notes_pdf(path=str(tmp_path / "exports"))
+    assert result["format"] == "pdf"
+    rendered = "\n".join(str(item) for item in capture["pdf"].lines)
+    assert "set_x" in rendered
+    assert "multi" in rendered
+    manager.close()
+

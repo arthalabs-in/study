@@ -22,6 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+animation = [
+    "manim>=0.18",
+]
 anki = [
     "genanki>=0.13",
 ]

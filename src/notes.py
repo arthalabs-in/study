@@ -9,16 +9,22 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import tempfile
 import time
+import shutil
 import unicodedata
 from datetime import datetime
 from pathlib import Path
+import re
 
 from src.latex_render import render_math_in_text
 from src.secure_storage import decrypt_text, encrypt_text
 
 
 DB_PATH = Path.home() / ".study-tui" / "notes.db"
+_DISPLAY_MATH_RE = re.compile(r"^\s*\$\$(.+?)\$\$\s*$", re.DOTALL)
+_INLINE_MATH_RE = re.compile(r"^\s*\$(.+?)\$\s*$", re.DOTALL)
 
 
 class NotesManager:
@@ -115,6 +121,91 @@ class NotesManager:
     @staticmethod
     def _render_note_text(value: str) -> str:
         return render_math_in_text(str(value or ""))
+
+    @staticmethod
+    def _candidate_tex_dirs() -> list[Path]:
+        dirs: list[Path] = []
+        for env_key in ("LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(env_key)
+            if not root:
+                continue
+            base = Path(root)
+            dirs.extend(
+                [
+                    base / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64",
+                    base / "MiKTeX" / "miktex" / "bin" / "x64",
+                    base / "MiKTeX" / "miktex" / "bin",
+                ]
+            )
+        return [path for path in dirs if path.exists()]
+
+    @staticmethod
+    def _find_tex_engine() -> str | None:
+        for name in ("pdflatex", "xelatex", "lualatex", "latex"):
+            found = shutil.which(name)
+            if found:
+                return found
+            binary_name = f"{name}.exe" if os.name == "nt" else name
+            for directory in NotesManager._candidate_tex_dirs():
+                candidate = directory / binary_name
+                if candidate.exists():
+                    return str(candidate)
+        return None
+
+    @staticmethod
+    def _is_math_only_block(value: str) -> tuple[bool, str, bool]:
+        text = str(value or "").strip()
+        if not text:
+            return False, "", False
+        display = _DISPLAY_MATH_RE.fullmatch(text)
+        if display:
+            return True, display.group(1).strip(), True
+        inline = _INLINE_MATH_RE.fullmatch(text)
+        if inline:
+            return True, inline.group(1).strip(), False
+        return False, "", False
+
+    @classmethod
+    def _render_latex_block_image(cls, latex: str, *, display: bool) -> Path | None:
+        try:
+            import fitz  # type: ignore
+        except Exception:
+            return None
+        tex_engine = cls._find_tex_engine()
+        if not tex_engine:
+            return None
+
+        work_dir = Path(tempfile.mkdtemp(prefix="study-tui-note-latex-"))
+        tex_path = work_dir / "snippet.tex"
+        pdf_path = work_dir / "snippet.pdf"
+        png_path = work_dir / "snippet.png"
+        body = f"$$\n{latex}\n$$" if display else f"${latex}$"
+        tex_source = (
+            "\\documentclass{article}\n"
+            "\\usepackage[margin=0.3in]{geometry}\n"
+            "\\pagestyle{empty}\n"
+            "\\begin{document}\n"
+            f"{body}\n"
+            "\\end{document}\n"
+        )
+        try:
+            tex_path.write_text(tex_source, encoding="utf-8")
+            completed = subprocess.run(
+                [tex_engine, "-interaction=nonstopmode", "-halt-on-error", str(tex_path.name)],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0 or not pdf_path.exists():
+                return None
+            document = fitz.open(str(pdf_path))
+            page = document.load_page(0)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+            pix.save(str(png_path))
+            document.close()
+            return png_path if png_path.exists() else None
+        except Exception:
+            return None
 
     @staticmethod
     def _pdf_safe_text(value: str, unicode_font: bool) -> str:
@@ -347,7 +438,11 @@ class NotesManager:
                 pdf.cell(0, 6, self._pdf_safe_text(f"Tags: {', '.join(n['tags'])}", unicode_font), new_x="LMARGIN", new_y="NEXT")
             pdf.set_font(font_family, size=11)
             pdf.ln(2)
-            pdf.multi_cell(0, 6, self._pdf_safe_text(self._render_note_text(n["content"]), unicode_font))
+            self._write_pdf_note_body(
+                pdf,
+                str(n["content"]),
+                unicode_font=unicode_font,
+            )
             pdf.ln(3)
             pdf.set_draw_color(200, 200, 200)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
@@ -362,6 +457,55 @@ class NotesManager:
         except Exception as e:
             return {"error": f"Failed to export notes PDF: {e}"}
         return {"exported": str(out_file), "count": len(notes), "format": "pdf"}
+
+    def _write_pdf_note_body(self, pdf, content: str, *, unicode_font: bool) -> None:
+        for raw_block in str(content or "").split("\n"):
+            block = raw_block.rstrip()
+            if not block.strip():
+                pdf.ln(4)
+                continue
+            is_math_only, latex, display = self._is_math_only_block(block)
+            if is_math_only and hasattr(pdf, "image"):
+                image_path = self._render_latex_block_image(latex, display=display)
+                if image_path and image_path.exists():
+                    try:
+                        self._reset_pdf_cursor(pdf)
+                        render_width = min(140, self._effective_pdf_width(pdf))
+                        pdf.image(str(image_path), w=render_width)
+                        self._reset_pdf_cursor(pdf)
+                        pdf.ln(2)
+                        continue
+                    except Exception:
+                        pass
+            self._reset_pdf_cursor(pdf)
+            pdf.multi_cell(
+                self._effective_pdf_width(pdf),
+                6,
+                self._pdf_safe_text(self._render_note_text(block), unicode_font),
+            )
+
+    @staticmethod
+    def _effective_pdf_width(pdf) -> float:
+        value = getattr(pdf, "epw", None)
+        if isinstance(value, (int, float)) and value > 0:
+            return float(value)
+        width = getattr(pdf, "w", None)
+        left = getattr(pdf, "l_margin", None)
+        right = getattr(pdf, "r_margin", None)
+        if all(isinstance(v, (int, float)) for v in (width, left, right)):
+            computed = float(width) - float(left) - float(right)
+            if computed > 0:
+                return computed
+        return 180.0
+
+    @staticmethod
+    def _reset_pdf_cursor(pdf) -> None:
+        if hasattr(pdf, "set_x"):
+            left = getattr(pdf, "l_margin", 10)
+            try:
+                pdf.set_x(left)
+            except Exception:
+                return
 
     # Internal
 

@@ -11,6 +11,7 @@ import src.agents.provider as provider_module
 import src.agents.tools as tools_module
 from src.agents.provider import (
     AnthropicProvider,
+    MAX_TOOL_CALL_ROUNDS,
     OpenAIProvider,
     get_provider,
     list_providers,
@@ -55,6 +56,23 @@ class FakeAnthropicStream:
 
     async def get_final_message(self):
         return self._response
+
+
+def test_provider_tool_loop_limit_is_raised() -> None:
+    assert MAX_TOOL_CALL_ROUNDS == 25
+
+
+def test_structured_flashcard_results_stay_full_inside_active_tool_loop() -> None:
+    flashcard_result = {
+        "tool": "generate_flashcards",
+        "result": "[FLASHCARDS]\nQ: One?\nA: First.\n\nQ: Two?\nA: Second.\n[/FLASHCARDS]",
+    }
+    assert AnthropicProvider._tool_result_for_active_loop("generate_flashcards", flashcard_result) == flashcard_result
+    assert AnthropicProvider._tool_result_for_active_loop("get_recent_flashcards", {"cards": [{"question": "Q", "answer": "A"}]}) == {
+        "cards": [{"question": "Q", "answer": "A"}]
+    }
+    compacted = AnthropicProvider._tool_result_for_active_loop("search_chunks", {"results": [{"text": "x" * 900}]})
+    assert compacted != {"results": [{"text": "x" * 900}]}
 
 
 class FakeResponsesStream(FakeAnthropicStream):
@@ -448,8 +466,19 @@ async def test_openai_codex_helpers_and_factory(monkeypatch) -> None:
     created = get_provider('ollama', model='llama3.2')
     assert isinstance(created, OpenAIProvider)
     assert any(item['name'] == 'openai-codex' and item['auth_mode'] == 'codex_oauth' for item in list_providers())
+    assert any(item['name'] == 'groq' and item['auth_mode'] == 'api_key' for item in list_providers())
     with pytest.raises(ValueError):
         get_provider('missing-provider')
+
+
+def test_groq_provider_uses_openai_compatible_base_url(monkeypatch) -> None:
+    monkeypatch.setenv('GROQ_API_KEY', 'groq-token')
+    provider = get_provider('groq')
+    assert isinstance(provider, OpenAIProvider)
+    assert provider.name == 'groq'
+    assert provider.model == 'llama-3.3-70b-versatile'
+    assert provider.api_key == 'groq-token'
+    assert str(provider._client.base_url) == 'https://api.groq.com/openai/v1/'
 
 
 

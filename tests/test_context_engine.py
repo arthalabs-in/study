@@ -6,6 +6,8 @@ from src.context_engine import (
     compact_model_history,
     compact_tool_result,
     make_model_history_entry,
+    make_tool_artifact,
+    prune_tool_artifacts,
 )
 
 
@@ -24,22 +26,49 @@ def test_build_context_snapshot_tracks_memory_and_contributors() -> None:
         make_model_history_entry("user", "Explain entropy simply."),
         make_model_history_entry("assistant", "Entropy is a measure of disorder in a system."),
     ]
+    artifact = make_tool_artifact("list_documents", [{"doc_id": "doc1", "title": "Thermo"}], 1)
     snapshot = build_context_snapshot(
         model_history=[entry for entry in model_history if entry],
         compact_memories=[{"id": "mem_1", "summary": "Earlier thermodynamics discussion", "source_count": 4}],
+        tool_artifacts=[artifact] if artifact else [],
+        current_turn_index=2,
         transcript_messages=6,
         model_name="gpt-4o",
         system_prompt="system",
         context_limit=128000,
         tool_result_chars=321,
+        selected_tool_count=2,
+        tool_schema_tokens=150,
     )
     assert snapshot.compact_memory_blocks == 1
     assert snapshot.tool_result_chars == 321
     assert snapshot.category_sizes["memory"] > 0
     assert snapshot.category_sizes["chat"] > 0
     assert snapshot.category_sizes["tool_results"] == 321
+    assert snapshot.category_sizes["tool_schemas"] == 150
+    assert snapshot.gist_artifact_count == 1
+    assert snapshot.selected_tool_count == 2
     assert snapshot.largest_contributors
-    assert any(msg["content"].startswith("[Compacted session memory") for msg in snapshot.messages)
+    assert any("compacted session memory" in msg["content"].lower() for msg in snapshot.messages)
+    assert any("Recent tool context" in msg["content"] for msg in snapshot.messages)
+
+
+def test_build_context_snapshot_emits_internal_context_as_system_messages() -> None:
+    model_history = [make_model_history_entry("user", "load keph102 and animate velocity")]
+    artifact = make_tool_artifact("list_available_files", [], 1)
+    snapshot = build_context_snapshot(
+        model_history=[entry for entry in model_history if entry],
+        compact_memories=[{"id": "mem_1", "summary": "Earlier context", "source_count": 1}],
+        tool_artifacts=[artifact] if artifact else [],
+        current_turn_index=2,
+        transcript_messages=3,
+        model_name="gpt-4o",
+        system_prompt="system",
+        context_limit=128000,
+    )
+    internal_messages = [msg for msg in snapshot.messages if "Host internal context" in msg["content"]]
+    assert internal_messages
+    assert all(msg["role"] == "system" for msg in internal_messages)
 
 
 def test_compact_model_history_keeps_recent_tail() -> None:
@@ -100,3 +129,62 @@ def test_compact_tool_result_preserves_generate_quiz_json_structure() -> None:
     assert isinstance(compacted["result"], list)
     assert compacted["result"][0]["type"] == "mcq"
     assert compacted["result"][0]["question"] == "What is SI unit?"
+
+
+def test_compact_tool_result_preserves_animation_metadata() -> None:
+    compacted = compact_tool_result(
+        "animate_concept",
+        {
+            "status": "error",
+            "topic": "entropy",
+            "attempt": 2,
+            "retryable": True,
+            "quality": "low",
+            "scene_name": "EntropyScene",
+            "duration_seconds": 4.25,
+            "video_path": "/tmp/entropy.mp4",
+            "code_path": "/tmp/entropy.py",
+            "error": "x" * 400,
+            "stderr_preview": "y" * 400,
+            "ignored": "nope",
+        },
+    )
+    assert compacted["topic"] == "entropy"
+    assert compacted["retryable"] is True
+    assert compacted["scene_name"] == "EntropyScene"
+    assert "ignored" not in compacted
+
+
+def test_prune_tool_artifacts_keeps_chunk_context_for_the_active_conversation() -> None:
+    artifact = make_tool_artifact(
+        "search_chunks",
+        {"chunks": [{"doc_id": "doc1", "page": 2, "text": "Entropy is disorder."}]},
+        3,
+    )
+    assert artifact is not None
+
+    age_zero = prune_tool_artifacts([artifact], 3)
+    assert age_zero.full_count == 1
+    assert age_zero.gist_count == 0
+
+    age_one = prune_tool_artifacts([artifact], 4)
+    assert age_one.full_count == 0
+    assert age_one.gist_count == 1
+
+    age_two = prune_tool_artifacts([artifact], 5)
+    assert len(age_two.kept) == 1
+    assert age_two.gist_count == 1
+    assert age_two.dropped_count == 0
+
+
+def test_prune_tool_artifacts_still_drops_ephemeral_file_listings() -> None:
+    artifact = make_tool_artifact(
+        "list_available_files",
+        [{"relative_path": "keph102.pdf", "source_name": "keph102.pdf"}],
+        3,
+    )
+    assert artifact is not None
+
+    age_two = prune_tool_artifacts([artifact], 5)
+    assert age_two.kept == []
+    assert age_two.dropped_count == 1

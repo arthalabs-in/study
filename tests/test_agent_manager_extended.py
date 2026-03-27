@@ -8,6 +8,8 @@ import pytest
 
 import src.agents.agent_manager as agent_manager_module
 from src.agents.agent_manager import AgentManager
+from src.agents.tools import NOTE_TOOLS
+from src.manim_renderer import RenderResult
 from src.notes import NotesManager
 from src.parsers.doc_store import Chunk, Document, DocStore
 from src.parsers.pdf_parser import ImageInfo
@@ -160,6 +162,41 @@ async def test_web_search_export_and_status_helpers(tmp_path, monkeypatch, popul
 
 
 @pytest.mark.asyncio
+async def test_notes_pdf_export_can_deliver_to_calibre_and_zotero(tmp_path, monkeypatch, populated_store) -> None:
+    provider = DummyProvider()
+    manager = AgentManager(doc_store=populated_store, provider=provider, notes_manager=NotesManager(tmp_path / 'notes.db'))
+    manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
+
+    exported_pdf = tmp_path / "exports" / "notes.pdf"
+    exported_pdf.parent.mkdir(parents=True, exist_ok=True)
+    exported_pdf.write_text("pdf", encoding="utf-8")
+    manager.notes_manager.export_notes_pdf = lambda path=None, note_id=None: {'exported': str(exported_pdf), 'count': 1, 'format': 'pdf'}
+
+    monkeypatch.setattr(manager, "_resolve_calibre_library", lambda: tmp_path)
+    monkeypatch.setattr(agent_manager_module.calibre_client, "attach_exported_pdf", lambda library_path, book_id, pdf_path: {'status': 'attached', 'book_id': book_id})
+    calibre_result = await manager.execute_tool(
+        'export_content',
+        {'type': 'notes_pdf', 'destination': 'calibre', 'calibre_book_id': 42},
+    )
+    assert calibre_result['delivery'] == 'calibre'
+    assert calibre_result['calibre']['book_id'] == 42
+
+    monkeypatch.setattr(agent_manager_module.zotero_client, "attach_exported_pdf", lambda item_key, pdf_path: {'status': 'attached', 'item_key': item_key})
+    zotero_result = await manager.execute_tool(
+        'export_content',
+        {'type': 'notes_pdf', 'destination': 'zotero', 'zotero_item_key': 'ABCD1234'},
+    )
+    assert zotero_result['delivery'] == 'zotero'
+    assert zotero_result['zotero']['item_key'] == 'ABCD1234'
+
+
+def test_note_tool_filters_allow_null_values_in_schema() -> None:
+    list_notes_schema = next(tool for tool in NOTE_TOOLS if tool["name"] == "list_notes")["input_schema"]["properties"]
+    assert "null" in list_notes_schema["doc_id"]["type"]
+    assert "null" in list_notes_schema["tag"]["type"]
+
+
+@pytest.mark.asyncio
 async def test_flashcards_export_uses_last_generated_cards_and_documents_dir(tmp_path) -> None:
     store = DocStore()
     provider = DummyProvider()
@@ -175,6 +212,23 @@ async def test_flashcards_export_uses_last_generated_cards_and_documents_dir(tmp
     assert result['count'] == 1
     assert result['exported'].endswith('.csv')
     assert str(tmp_path) in result['exported']
+
+
+@pytest.mark.asyncio
+async def test_get_recent_flashcards_returns_latest_session_cards() -> None:
+    manager = AgentManager(
+        doc_store=DocStore(),
+        provider=DummyProvider(),
+        flashcards_ref=[
+            {'question': 'Q1', 'answer': 'A1'},
+            {'question': 'Q2', 'answer': 'A2'},
+        ],
+    )
+
+    result = await manager.execute_tool('get_recent_flashcards', {'limit': 1})
+    assert result['count'] == 1
+    assert result['total_count'] == 2
+    assert result['cards'][0]['question'] == 'Q1'
 
 
 @pytest.mark.asyncio
@@ -215,5 +269,78 @@ async def test_calibre_and_zotero_validations(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(agent_manager_module.zotero_client, 'is_available', lambda: True)
     invalid = await manager.execute_tool('zotero_load', {'item_key': '../bad'})
     assert invalid['error'] == 'Invalid Zotero item key.'
+
+
+@pytest.mark.asyncio
+async def test_animate_concept_handles_missing_manim(monkeypatch) -> None:
+    manager = AgentManager(doc_store=DocStore(), provider=DummyProvider())
+    manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
+    monkeypatch.setattr(
+        agent_manager_module,
+        "get_animation_dependency_error",
+        lambda: "A LaTeX engine is required for animations. Install LaTeX (latex, pdflatex, xelatex, or lualatex).",
+    )
+
+    result = await manager.execute_tool(
+        'animate_concept',
+        {'topic': 'sine wave', 'code': 'from manim import *\nclass DemoScene(Scene):\n    def construct(self):\n        self.wait()'},
+    )
+
+    assert result['status'] == 'error'
+    assert result['retryable'] is False
+    assert 'LaTeX engine is required' in result['error']
+
+
+@pytest.mark.asyncio
+async def test_animate_concept_success_and_failure_shapes(monkeypatch, tmp_path) -> None:
+    manager = AgentManager(doc_store=DocStore(), provider=DummyProvider(), default_export_dir=tmp_path)
+    manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
+    monkeypatch.setattr(agent_manager_module, 'get_animation_dependency_error', lambda: None)
+
+    async def fake_render_success(code, *, export_dir=None, quality='low', timeout=120):
+        return RenderResult(
+            success=True,
+            video_path=str(tmp_path / 'demo.mp4'),
+            code_path=str(tmp_path / 'demo.py'),
+            scene_name='DemoScene',
+            duration_seconds=1.25,
+        )
+
+    monkeypatch.setattr(agent_manager_module, 'render_animation', fake_render_success)
+    success = await manager.execute_tool(
+        'animate_concept',
+        {
+            'topic': 'vector addition',
+            'code': 'from manim import *\nclass DemoScene(Scene):\n    def construct(self):\n        self.wait()',
+            'quality': 'medium',
+        },
+    )
+    assert success['status'] == 'success'
+    assert success['scene_name'] == 'DemoScene'
+    assert success['video_path'].endswith('demo.mp4')
+
+    async def fake_render_failure(code, *, export_dir=None, quality='low', timeout=120):
+        return RenderResult(
+            success=False,
+            error='Render error: bad mobject',
+            stderr='Traceback: bad mobject',
+            code_path=str(tmp_path / 'broken.py'),
+            scene_name='BrokenScene',
+            duration_seconds=0.4,
+        )
+
+    monkeypatch.setattr(agent_manager_module, 'render_animation', fake_render_failure)
+    failure = await manager.execute_tool(
+        'animate_concept',
+        {
+            'topic': 'vector addition',
+            'code': 'from manim import *\nclass BrokenScene(Scene):\n    def construct(self):\n        self.wait()',
+            'attempt': 2,
+        },
+    )
+    assert failure['status'] == 'error'
+    assert failure['retryable'] is True
+    assert failure['attempt'] == 2
+    assert failure['code_path'].endswith('broken.py')
 
 

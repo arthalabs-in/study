@@ -31,6 +31,8 @@ from src.context_engine import compact_tool_result
 
 _TOOL_TEXT_LIMIT = 500
 _TOOL_LIST_LIMIT = 6
+MAX_TOOL_CALL_ROUNDS = 25
+_FULL_TOOL_LOOP_RESULT_NAMES = {"generate_flashcards", "generate_quiz", "get_recent_flashcards"}
 
 
 # ── Provider registry ───────────────────────────────────────────────
@@ -62,6 +64,16 @@ PROVIDER_CONFIGS: dict[str, dict] = {
         "base_url": None,  # default
         "default_model": "gpt-4o",
         "env_key": "OPENAI_API_KEY",
+        "auth_mode": "api_key",
+        "supports_thinking": False,
+        "supports_tools": True,
+    },
+    "groq": {
+        "display_name": "Groq",
+        "family": "openai",
+        "base_url": "https://api.groq.com/openai/v1",
+        "default_model": "llama-3.3-70b-versatile",
+        "env_key": "GROQ_API_KEY",
         "auth_mode": "api_key",
         "supports_thinking": False,
         "supports_tools": True,
@@ -123,6 +135,8 @@ KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-5": 400000,
     "gpt-4.1": 1047576,
     "gpt-4o": 128000,
+    "llama-3.3-70b-versatile": 131072,
+    "moonshotai/kimi-k2-instruct-0905": 262144,
     "claude-sonnet-4": 200000,
     "claude-3-7-sonnet": 200000,
     "claude-3-5-sonnet": 200000,
@@ -263,6 +277,12 @@ class AnthropicProvider(LLMProvider):
     def _compact_tool_result(cls, tool_name: str, result: Any) -> Any:
         return compact_tool_result(tool_name, result)
 
+    @classmethod
+    def _tool_result_for_active_loop(cls, tool_name: str, result: Any) -> Any:
+        if str(tool_name or "").strip().lower() in _FULL_TOOL_LOOP_RESULT_NAMES:
+            return result
+        return cls._compact_tool_result(tool_name, result)
+
     async def get_context_window_async(self) -> int | None:
         model_key = self.model.lower()
         for prefix, limit in KNOWN_CONTEXT_WINDOWS.items():
@@ -293,7 +313,7 @@ class AnthropicProvider(LLMProvider):
                 working_messages.append(msg)
 
         full_text = ""
-        max_rounds = 10
+        max_rounds = MAX_TOOL_CALL_ROUNDS
 
         for _ in range(max_rounds):
             kwargs: dict = {
@@ -400,7 +420,7 @@ class AnthropicProvider(LLMProvider):
                         result = await tool_executor(tc["name"], tc["input"])
                     else:
                         result = {"error": f"No executor for {tc['name']}"}
-                    compact_result = self._compact_tool_result(tc["name"], result)
+                    compact_result = self._tool_result_for_active_loop(tc["name"], result)
                     if on_tool_result:
                         on_tool_result(tc["name"], compact_result)
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
@@ -438,7 +458,7 @@ class AnthropicProvider(LLMProvider):
                 working_messages.append(msg)
 
         full_text = ""
-        max_rounds = 10
+        max_rounds = MAX_TOOL_CALL_ROUNDS
 
         for _ in range(max_rounds):
             kwargs: dict = {
@@ -473,7 +493,7 @@ class AnthropicProvider(LLMProvider):
                         result = await tool_executor(tc["name"], tc["input"])
                     else:
                         result = {"error": f"No executor for {tc['name']}"}
-                    compact_result = self._compact_tool_result(tc["name"], result)
+                    compact_result = self._tool_result_for_active_loop(tc["name"], result)
                     if on_tool_result:
                         on_tool_result(tc["name"], compact_result)
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
@@ -889,7 +909,7 @@ class OpenAIProvider(LLMProvider):
                 return repaired_action
             return None
 
-        for _ in range(8):
+        for _ in range(MAX_TOOL_CALL_ROUNDS):
             prompt = self._build_codex_tool_prompt(working_messages, tools=tools, system=system)
             raw = await self._run_codex_prompt_impl(prompt, on_text=None)
             action = await resolve_action(raw)
@@ -934,7 +954,7 @@ class OpenAIProvider(LLMProvider):
             else:
                 result = {"error": f"No executor for {name}"}
 
-            compact_result = AnthropicProvider._compact_tool_result(name, result)
+            compact_result = AnthropicProvider._tool_result_for_active_loop(name, result)
             if on_tool_result:
                 on_tool_result(name, compact_result)
             result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
@@ -1106,7 +1126,7 @@ class OpenAIProvider(LLMProvider):
         contents = self._build_gemini_contents(messages)
         full_text = ""
 
-        for _ in range(10):
+        for _ in range(MAX_TOOL_CALL_ROUNDS):
             response = await self._gemini_generate_content(
                 contents=contents,
                 tools=tools,
@@ -1130,7 +1150,7 @@ class OpenAIProvider(LLMProvider):
                         result = await tool_executor(fn_name, fn_args)
                     else:
                         result = {"error": f"No executor for {fn_name}"}
-                    compact_result = AnthropicProvider._compact_tool_result(fn_name, result)
+                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
                     if on_tool_result:
                         on_tool_result(fn_name, compact_result)
                     function_response_parts.append({
@@ -1220,7 +1240,7 @@ class OpenAIProvider(LLMProvider):
         pending_input: list[dict] = base_input
         response_tools = self._convert_tools_to_responses(tools) if tools and self.supports_tools else None
 
-        for _ in range(10):
+        for _ in range(MAX_TOOL_CALL_ROUNDS):
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "input": pending_input,
@@ -1278,7 +1298,7 @@ class OpenAIProvider(LLMProvider):
                     result = await tool_executor(tool_call["name"], fn_args)
                 else:
                     result = {"error": f"No executor for {tool_call['name']}"}
-                compact_result = AnthropicProvider._compact_tool_result(tool_call["name"], result)
+                compact_result = AnthropicProvider._tool_result_for_active_loop(tool_call["name"], result)
                 if on_tool_result:
                     on_tool_result(tool_call["name"], compact_result)
                 result_str = json.dumps(compact_result) if isinstance(compact_result, (dict, list)) else str(compact_result)
@@ -1386,7 +1406,7 @@ class OpenAIProvider(LLMProvider):
                 working_messages.append(msg)
 
         full_text = ""
-        max_rounds = 10
+        max_rounds = MAX_TOOL_CALL_ROUNDS
         openai_tools = self._convert_tools_to_openai(tools) if tools and self.supports_tools else None
 
         for _ in range(max_rounds):
@@ -1498,7 +1518,7 @@ class OpenAIProvider(LLMProvider):
                     else:
                         result = {"error": f"No executor for {fn_name}"}
 
-                    compact_result = AnthropicProvider._compact_tool_result(fn_name, result)
+                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
                     if on_tool_result:
                         on_tool_result(fn_name, compact_result)
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
@@ -1564,7 +1584,7 @@ class OpenAIProvider(LLMProvider):
                 working_messages.append(msg)
 
         full_text = ""
-        max_rounds = 10
+        max_rounds = MAX_TOOL_CALL_ROUNDS
         openai_tools = self._convert_tools_to_openai(tools) if tools and self.supports_tools else None
 
         for _ in range(max_rounds):
@@ -1603,7 +1623,7 @@ class OpenAIProvider(LLMProvider):
                         result = await tool_executor(fn_name, fn_args)
                     else:
                         result = {"error": f"No executor for {fn_name}"}
-                    compact_result = AnthropicProvider._compact_tool_result(fn_name, result)
+                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
                     if on_tool_result:
                         on_tool_result(fn_name, compact_result)
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)

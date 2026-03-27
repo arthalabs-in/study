@@ -28,6 +28,7 @@ The launcher opens a new PowerShell window with an isolated home directory and d
 
 - Startup help text renders and the input box is focused.
 - `/provider` opens the nested picker and switching providers works with keyboard only.
+- If a remote API key is configured, switching to `openai`, `anthropic`, `gemini`, `groq`, or `kimi` works without crashing.
 - `/model` opens a nested picker and selecting a model updates the connected label.
 - `/theme` opens a nested picker and changes shell chrome immediately.
 - `/history` and `/resume` open nested pickers and resume the expected session.

@@ -127,6 +127,7 @@ Only claim a provider is working if it passes one live round-trip.
 - `openai`
 - `anthropic`
 - `gemini`
+- `groq`
 - `kimi`
 
 ### Local/OpenAI-Compatible Providers
@@ -147,6 +148,7 @@ python -m pytest tests/test_provider_live.py -m live_provider -q -rs
 ```
 
 Set the relevant provider env vars before running it.
+For Groq, set `GROQ_API_KEY` and optionally `LIVE_GROQ_MODEL`.
 
 ## 6. Release Bar
 

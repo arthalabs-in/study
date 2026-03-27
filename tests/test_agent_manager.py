@@ -38,6 +38,28 @@ async def test_save_note_requires_approval(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_animate_concept_requires_approval() -> None:
+    approvals: list[tuple[str, dict]] = []
+
+    async def deny(tool_name: str, args: dict) -> bool:
+        approvals.append((tool_name, args))
+        return False
+
+    manager = AgentManager(
+        doc_store=DocStore(),
+        provider=DummyProvider(),
+        request_tool_approval=deny,
+    )
+
+    result = await manager.execute_tool(
+        'animate_concept',
+        {'topic': 'Sine wave', 'code': 'from manim import *\nclass SineScene(Scene):\n    def construct(self):\n        self.wait()'},
+    )
+    assert result['status'] == 'denied'
+    assert approvals[0][0] == 'animate_concept'
+
+
+@pytest.mark.asyncio
 async def test_load_file_stays_inside_documents_dir(documents_dir: Path) -> None:
     nested = documents_dir / 'nested'
     nested.mkdir()

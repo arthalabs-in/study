@@ -182,3 +182,27 @@ def get_pdf_path(item_key: str) -> Path | None:
         return None
     except Exception:
         return None
+
+
+def attach_exported_pdf(item_key: str, pdf_path: str | Path) -> dict:
+    """Attach an exported PDF as a child attachment to an existing Zotero item."""
+    if not _HAS_PYZOTERO:
+        return {"error": "Zotero export requires the optional dependency 'pyzotero'."}
+    normalized_key = (item_key or "").strip().upper()
+    if not ITEM_KEY_RE.fullmatch(normalized_key):
+        return {"error": "Invalid Zotero item key."}
+    file_path = Path(pdf_path)
+    if not file_path.is_file():
+        return {"error": "Exported PDF file was not found."}
+
+    try:
+        zot = _zotero.Zotero(library_id="0", library_type="user", api_key="", local=True)
+        result = zot.attachment_simple([str(file_path)], parentid=normalized_key)
+        return {
+            "status": "attached",
+            "item_key": normalized_key,
+            "path": str(file_path),
+            "result": result,
+        }
+    except Exception as exc:
+        return {"error": f"Failed to attach PDF to Zotero: {exc}"}
