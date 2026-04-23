@@ -130,7 +130,7 @@ class FakeChat:
     def clear_log(self) -> None:
         self.cleared = True
 
-    def write_welcome(self) -> None:
+    def write_welcome(self, overview=None) -> None:
         self.welcome_written = True
 
     def focus_input(self) -> None:
@@ -537,6 +537,36 @@ def test_remote_doc_privacy_gate_blocks_local_only() -> None:
 
     assert allowed is False
     assert any('blocked in local_only privacy mode' in msg.lower() for msg in chat.errors)
+
+
+@pytest.mark.asyncio
+async def test_generation_flushes_normalized_table_after_response_started(monkeypatch) -> None:
+    app, chat, _history, _workers = make_app()
+    app._chat_history = [{'role': 'user', 'content': 'compare these'}]
+    app._provider = FakeProvider()
+    app._agent_manager = FakeAgentManager()
+    app._privacy_mode = 'standard'
+    app._remote_docs_approved = True
+
+    async def table_after_started_stream(**kwargs):
+        chunks = [
+            "Intro paragraph.\n\n",
+            "| Topic | Status |\n| --- | --- |\n| Quiz | Complete |\n",
+            "\nNext step: review.",
+        ]
+        for chunk in chunks:
+            kwargs['on_text'](chunk)
+        return ''.join(chunks)
+
+    monkeypatch.setattr(app_module, 'stream_chat', table_after_started_stream)
+
+    await StudyTUI._run_generation(app)
+
+    rendered_tokens = ''.join(chat.response_tokens)
+    assert "| Topic | Status |" not in rendered_tokens
+    assert "- Topic: Quiz; Status: Complete" in rendered_tokens
+    assert "Next step: review." in rendered_tokens
+    assert app._chat_history[-1]['content'] == rendered_tokens
 
 
 def test_codex_auth_store_reads_and_logs_in(tmp_path, monkeypatch) -> None:
@@ -999,6 +1029,37 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
     assert '</think>' not in rendered_tokens
     assert 'THINK:hidden reasoning' in rendered_tokens
 
+    normalized = app_module._normalize_terminal_output(
+        "Comparison:\n\n"
+        "| Topic | Status |\n"
+        "| --- | --- |\n"
+        "| Quiz | Complete |\n"
+        "| Flashcards | Ready |\n"
+    )
+    assert "| Topic | Status |" not in normalized
+    assert "- Topic: Quiz; Status: Complete" in normalized
+    assert "- Topic: Flashcards; Status: Ready" in normalized
+
+    chat.response_tokens.clear()
+
+    async def table_stream(**kwargs):
+        text = (
+            "Current status:\n\n"
+            "| Topic | Status |\n"
+            "| --- | --- |\n"
+            "| Quiz | Complete |\n"
+            "| Flashcards | Ready |\n"
+        )
+        kwargs['on_text'](text)
+        return text
+
+    monkeypatch.setattr(app_module, 'stream_chat', table_stream)
+    await StudyTUI._run_generation(app)
+    rendered_tokens = ''.join(chat.response_tokens)
+    assert "| Topic | Status |" not in rendered_tokens
+    assert "- Topic: Quiz; Status: Complete" in rendered_tokens
+    assert app._chat_history[-1]['content'] == rendered_tokens
+
     chat.response_tokens.clear()
     start_response_before_flashcards = chat.start_response_calls
 
@@ -1083,8 +1144,42 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
     assert intro_lines == ['Here are some flashcards to reinforce the weak points:']
     assert outro_lines == ['If you want, I can make a harder set next.']
     assert chat.tool_done[-1] == 'Generated 2 flashcards'
+    assert app._chat_history[-1]['content'] == '[FLASHCARD SESSION STARTED] Generated 2 flashcards.'
     assert ''.join(chat.response_tokens) == ''
     assert chat.start_response_calls == start_response_before_tool_flashcards
+
+    async def agentic_cloze_flashcard_stream(**kwargs):
+        deck = [
+            {
+                "question": "Fill the blank: {{c1::Heat}} moves from hot to cold.",
+                "answer": "Heat moves from hot to cold.",
+                "card_type": "cloze",
+                "cloze_text": "{{c1::Heat}} moves from hot to cold.",
+                "source_refs": [{"doc_id": "docx", "page": 2, "chunk_id": "c2"}],
+                "tags": ["thermo"],
+                "focus": "weak_area",
+                "difficulty": "medium",
+            }
+        ]
+        payload = json.dumps(deck)
+        kwargs['on_tool_result'](
+            'generate_flashcards',
+            {
+                'tool': 'generate_flashcards',
+                'result': payload,
+            },
+        )
+        kwargs['on_text'](payload)
+        return payload
+
+    monkeypatch.setattr(app_module, 'stream_chat', agentic_cloze_flashcard_stream)
+    await StudyTUI._run_generation(app)
+    cards, _intro_lines, _outro_lines = chat.started_flashcards[-1]
+    assert cards[0]['card_type'] == 'cloze'
+    assert cards[0]['cloze_text'] == '{{c1::Heat}} moves from hot to cold.'
+    assert cards[0]['source_refs'] == [{"doc_id": "docx", "page": 2, "chunk_id": "c2"}]
+    assert cards[0]['tags'] == ["thermo"]
+    assert app._progress_mgr.flashcard_calls[-1]['cards'][0]['card_type'] == 'cloze'
 
     chat.response_tokens.clear()
 
@@ -1116,8 +1211,29 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
     assert cards[0]['question'] == 'What is heat?'
     assert intro_lines == ['Here are some flashcards to reinforce the points you missed:']
     assert outro_lines == ['If you want, I can make a harder set next.']
+    assert app._chat_history[-1]['content'] == '[FLASHCARD SESSION STARTED] Generated 2 flashcards.'
     assert ''.join(chat.response_tokens) == ''
     assert chat.start_response_calls == start_response_before_tool_flashcards
+
+    chat.response_tokens.clear()
+
+    async def table_after_started_stream(**kwargs):
+        chunks = [
+            "Intro paragraph.\n\n",
+            "| Topic | Status |\n| --- | --- |\n| Quiz | Complete |\n",
+            "\nNext step: review.",
+        ]
+        for chunk in chunks:
+            kwargs['on_text'](chunk)
+        return ''.join(chunks)
+
+    monkeypatch.setattr(app_module, 'stream_chat', table_after_started_stream)
+    await StudyTUI._run_generation(app)
+    rendered_tokens = ''.join(chat.response_tokens)
+    assert "| Topic | Status |" not in rendered_tokens
+    assert "- Topic: Quiz; Status: Complete" in rendered_tokens
+    assert "Next step: review." in rendered_tokens
+    assert app._chat_history[-1]['content'] == rendered_tokens
 
     chat.response_tokens.clear()
 
@@ -1129,6 +1245,7 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
                 'topic': 'Units and Measurement',
                 'attempt': 1,
                 'retryable': False,
+                'backend': 'motion_canvas',
                 'quality': 'low',
                 'scene_name': 'UnitsScene',
                 'duration_seconds': 1.2,
@@ -1143,6 +1260,7 @@ async def test_load_file_and_quiz_and_generation_paths(tmp_path, monkeypatch) ->
     await StudyTUI._run_generation(app)
     assert chat.tool_done[-1] == 'Rendered animation for Units and Measurement.'
     assert chat.info_blocks[-1][0] == 'Animation'
+    assert any('Backend: motion_canvas' in line for line in chat.info_blocks[-1][1])
     assert any('Video: C:/exports/units.mp4' in line for line in chat.info_blocks[-1][1])
     assert app._chat_history[-1]['content'].startswith('[ANIMATION RENDERED]')
 
@@ -1505,6 +1623,12 @@ def test_system_prompt_for_tools_loads_animation_skill_only_for_animation(monkey
     assert "TeX" in app_module.SYSTEM_PROMPT
 
 
+def test_animation_guidance_includes_motion_canvas_template_and_retry_hint() -> None:
+    assert "supported scaffold" in app_module.SYSTEM_PROMPT
+    assert "@motion-canvas/core" in app_module.SYSTEM_PROMPT
+    assert "does not provide an export named" in app_module.COMPACT_ANIMATION_GUIDANCE
+
+
 def test_system_prompt_for_tools_describes_persistent_toolset() -> None:
     app, _chat, _history, _workers = make_app()
     selected = StudyTUI._select_tools(app, "load keph101", flow="chat")
@@ -1534,6 +1658,48 @@ def test_pending_workflow_prompt_message_is_internal_system_context() -> None:
     assert msg["role"] == "system"
     assert "pending study workflow" in msg["content"].lower()
     assert "load_then_animate" in msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_study_setup_keeps_host_instruction_out_of_history() -> None:
+    app, chat, _history, workers = make_app()
+
+    await StudyTUI._run_study_setup(app)
+
+    assert chat.user_messages[-1] == "/study-setup"
+    assert app._chat_history == [{"role": "user", "content": "/study-setup"}]
+    assert len(app._model_history) == 1
+    assert app._model_history[0]["role"] == "user"
+    assert app._model_history[0]["content"] == "/study-setup"
+    assert workers[-1][0].name == "_run_generation"
+
+
+@pytest.mark.asyncio
+async def test_setup_answer_does_not_append_host_followup_instruction() -> None:
+    app, _chat, _history, _workers = make_app()
+    app._chat_history = [{"role": "user", "content": "/study-setup"}]
+    app._model_history = [{"role": "user", "content": "/study-setup"}]
+    app._setup_state = {"active": True, "index": 0, "answers": {}}
+
+    await StudyTUI._handle_setup_answer(app, "exam performance")
+
+    assert app._setup_state["answers"]["goal"] == "exam performance"
+    assert app._chat_history == [{"role": "user", "content": "/study-setup"}]
+    assert len(app._model_history) == 1
+    assert app._model_history[0]["role"] == "user"
+    assert app._model_history[0]["content"] == "/study-setup"
+
+
+@pytest.mark.asyncio
+async def test_setup_answer_cancel_aborts_setup() -> None:
+    app, chat, _history, workers = make_app()
+    app._setup_state = {"active": True, "index": 0, "answers": {}}
+
+    await StudyTUI._handle_setup_answer(app, "/cancel")
+
+    assert app._setup_state is None
+    assert chat.system_messages[-1] == "Study setup cancelled."
+    assert workers == []
 
 
 def test_mark_pending_workflow_clears_on_clear_pivot() -> None:

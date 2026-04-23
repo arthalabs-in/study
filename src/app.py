@@ -64,6 +64,20 @@ from src.debug_trace import DebugTracer
 from src.study_progress import StudyProgressManager, compute_file_hash
 from src.zotero_webhook import DEFAULT_PORT as DEFAULT_ZOTERO_WEBHOOK_PORT, ZoteroWebhookServer, generate_webhook_secret
 from src.manim_renderer import get_animation_dependency_error, is_manim_available, is_tex_available
+from src.motion_canvas_renderer import (
+    get_motion_canvas_dependency_error,
+    get_motion_canvas_runtime_probe,
+    is_motion_canvas_available,
+)
+from src.card_formats import normalize_cards
+from src.personalization_engine import compute_profile, steering_summary
+from src.retention_engine import (
+    build_quiz_recovery_plan,
+    recommend_study_now,
+    build_targeted_drill,
+    recommend_flashcard_generation,
+    recommend_quiz_generation,
+)
 
 try:
     import tomllib
@@ -636,7 +650,7 @@ Your capabilities:
 8. generate_quiz(topic, difficulty, count) — create practice quizzes
 9. summarize_document(doc_id, section) — summarize documents
 10. get_recent_flashcards(limit) — retrieve the most recently generated flashcards from this session
-11. animate_concept(topic, code, quality, attempt) — render a Manim concept animation
+11. animate_concept(topic, code, quality, attempt, backend) — render a concept animation
 
 Study actions from plain language:
 - If the user asks in normal prose for flashcards, a quiz, a summary, or an animation, you should handle that directly with the study tools. They do NOT need to type /flashcards, /quiz, /summary, or /animate.
@@ -648,11 +662,17 @@ Study actions from plain language:
 - If the user asks for flashcards or a quiz with a focus, carry that focus into the topic, difficulty, or section you pass to the tool.
 - When you use generate_quiz, the host app will launch the interactive quiz UI from the returned JSON. Return the quiz data cleanly and do not restate the full solved quiz in prose.
 - Use animate_concept when the user asks to animate, visualize, or create a video explanation of a concept, or when a weak topic would benefit from a visual explanation.
-- animate_concept requires complete Manim code in the code field. Do not paste Manim code into normal chat unless the user explicitly asks for the source.
-- The animation stack supports TeX, but plain explanatory text must stay TeX-safe. Use MathTex/Tex only for actual formulas or symbols, escape special characters like &, %, _, and #, and avoid TeX-backed helpers such as BulletedList for normal prose.
+- Default to backend=manim unless the user explicitly asks for Motion Canvas or you intentionally want to try the experimental browser-based path.
+- For backend=manim, provide complete Manim Python code in the code field. Do not paste Manim code into normal chat unless the user explicitly asks for the source.
+- For backend=motion_canvas, provide a self-contained Motion Canvas scene file that exports default makeScene2D(...).
+- For backend=motion_canvas, you may use the full `@motion-canvas/*` namespace. The renderer will provision referenced Motion Canvas packages into its local runtime automatically. Keep imports inside that namespace unless you truly need something else.
+- For backend=motion_canvas, stay close to this supported scaffold: import scene nodes like Circle/Line/Rect/Txt/makeScene2D from `@motion-canvas/2d`, import timing/helpers like all/createRef/waitFor/easing and geometry helpers like `Vector2` from `@motion-canvas/core`, then `export default makeScene2D(function* (view) { ... })`.
+- For backend=motion_canvas, never call `ref()` before the node has been mounted with `view.add(...)` or included inside a mounted JSX tree.
+- The Manim path supports TeX, but plain explanatory text must stay TeX-safe. Use MathTex/Tex only for actual formulas or symbols, escape special characters like &, %, _, and #, and avoid TeX-backed helpers such as BulletedList for normal prose.
 - Aim for a polished teaching animation, not a quick demo clip: default to roughly 60-90 seconds, 6-10 storyboard beats, and a clean final takeaway frame unless the user explicitly asks for something short.
 - Prevent text artifacts: keep labels sparse, reserve space before introducing new text, and never leave overlapping text blocks or crowded equations on screen.
 - If animate_concept fails with retryable=true, inspect the structured error and call animate_concept again with corrected code. Increase attempt on retries.
+- If a Motion Canvas error says `does not provide an export named X`, fix the import source for `X` before retrying.
 - After weak quiz or review results, it is good to offer an animation suggestion if a visual explanation could help.
 - If your final answer is a flashcard deck, format it for the host app exactly like this:
   [FLASHCARDS]
@@ -739,8 +759,9 @@ Rules:
 - Expect save_note and export_content to pause for runtime user approval before writing to disk.
 - When generating note or summary text that contains formulas, keep the formulas as LaTeX so the app can render and export them well.
 - If no documents are loaded, use list_available_files to help the user find and load one.
-- NEVER use markdown tables. Use bullet points, numbered lists, or clean prose instead.
-- Keep formatting terminal-friendly: use -, *, or numbered lists. No | pipes or table syntax.
+- NEVER use markdown tables. The terminal chat view does not reliably render them.
+- If you need to compare items, use flat bullets with `label: value` pairs, numbered lists, or short prose instead.
+- Keep formatting terminal-friendly: use -, *, or numbered lists. No | pipes, column layouts, or table syntax.
 - You can use LaTeX math in your responses — $...$ for inline, $$...$$ for display.
 
 
@@ -774,13 +795,18 @@ CORE_ALWAYS_ON_TOOL_NAMES = {
 COMPACT_ANIMATION_GUIDANCE = """\
 Animation-specific execution guidance:
 - Keep the animation narrow, but make it feel complete: target roughly 60-90 seconds with a 6-10 beat storyboard unless the user asks for a short clip.
+- Default to backend=manim for the stable path. Use backend=motion_canvas only when the user explicitly wants it or when you intentionally want to try the experimental browser-based renderer.
+- On the Motion Canvas path, you may use the full `@motion-canvas/*` namespace. The renderer will install referenced Motion Canvas packages automatically, so prefer that namespace over unrelated libraries.
+- On the Motion Canvas path, follow the supported scaffold: scene nodes from `@motion-canvas/2d`, timing/helpers and `Vector2` from `@motion-canvas/core`, and `export default makeScene2D(function* (view) { ... })`.
+- On the Motion Canvas path, do not call `ref()` before the referenced node is mounted.
 - Use visually sparse scenes with short labels close to the objects they describe.
 - Prevent overlap artifacts by moving or fading old labels before adding new text, and avoid stacking multiple dense text blocks at once.
 - Prefer slower pacing, explicit run_time values, and brief pauses on key takeaways.
 - Preserve continuity with transforms or staged motion instead of abrupt object swaps.
-- Use MathTex/Tex only for true equations or symbols. For ordinary explanatory prose, prefer Text/VGroup layouts, escape TeX special characters like &, %, _, and #, and avoid BulletedList unless every line is TeX-safe.
+- On the Manim path, use MathTex/Tex only for true equations or symbols. For ordinary explanatory prose, prefer Text/VGroup layouts, escape TeX special characters like &, %, _, and #, and avoid BulletedList unless every line is TeX-safe.
 - Prefer quality=high for final teaching animations unless the user explicitly asks for a faster preview render.
 - If animate_concept fails with retryable=true, inspect the structured error and retry with corrected code.
+- If a Motion Canvas error says `does not provide an export named X`, fix the import source for `X` before retrying.
 """
 QUIZ_JSON_PROMPT = """\
 Generate a practice quiz from the loaded documents. Search the documents first to find key content.
@@ -812,6 +838,14 @@ Return ONLY a valid JSON object:
 {"correct": true, "feedback": "short reason"}
 """
 
+_SETUP_QUESTIONS = [
+    ("goal", "Primary study goal: exam performance, deep understanding, or both?"),
+    ("preferred_mode", "Preferred study mode: flashcards, quiz, review, explanation, or mixed?"),
+    ("tutoring_style", "Tutoring style: direct, socratic, concept-first, or exam-first?"),
+    ("session_length_minutes", "Preferred session length in minutes (e.g., 10, 25, 45)?"),
+    ("question_style", "Question style preference: recall-heavy, mixed, or applied?"),
+]
+
 
 def _read_markdown_without_frontmatter(path: Path) -> str:
     try:
@@ -823,6 +857,70 @@ def _read_markdown_without_frontmatter(path: Path) -> str:
         if len(parts) == 3:
             text = parts[2].strip()
     return text
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if len(cells) < 2:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", cell)) for cell in cells)
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    if not (stripped.startswith("|") and stripped.endswith("|")):
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return len(cells) >= 2 and any(cell for cell in cells)
+
+
+def _contains_markdown_table(text: str) -> bool:
+    lines = text.splitlines()
+    for index in range(len(lines) - 1):
+        if _is_markdown_table_row(lines[index]) and _is_markdown_table_separator(lines[index + 1]):
+            return True
+    return False
+
+
+def _contains_markdown_table_fragment(text: str) -> bool:
+    return any(line.strip().startswith("|") for line in text.splitlines())
+
+
+def _normalize_terminal_output(text: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if (
+            index + 1 < len(lines)
+            and _is_markdown_table_row(line)
+            and _is_markdown_table_separator(lines[index + 1])
+        ):
+            headers = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            index += 2
+            rows: list[list[str]] = []
+            while index < len(lines) and _is_markdown_table_row(lines[index]):
+                rows.append([cell.strip() for cell in lines[index].strip().strip("|").split("|")])
+                index += 1
+            if rows:
+                for row in rows:
+                    pairs: list[str] = []
+                    for header, value in zip(headers, row):
+                        if value:
+                            pairs.append(f"{header}: {value}")
+                    output.append("- " + "; ".join(pairs) if pairs else "-")
+            else:
+                output.append("- " + "; ".join(header for header in headers if header))
+            continue
+        output.append(line)
+        index += 1
+    return "\n".join(output)
 
 
 @lru_cache(maxsize=1)
@@ -1077,8 +1175,9 @@ class StudyTUI(App):
         yield Footer()
 
     async def on_mount(self) -> None:
+        self._set_terminal_title("study")
         chat = self.query_one(ChatView)
-        chat.write_welcome()
+        chat.write_welcome(self._welcome_overview())
         if self._debug_mode:
             chat.add_error("DEBUG MODE ENABLED — prompts, tool payloads, document context, and model responses are being written to disk.")
             chat.add_system_message(f"Debug trace directory: {self._debug_tracer.session_dir}")
@@ -1137,6 +1236,20 @@ class StudyTUI(App):
 
     def on_unmount(self) -> None:
         self._stop_zotero_webhook()
+
+    @staticmethod
+    def _set_terminal_title(title: str) -> None:
+        safe_title = str(title or "").strip() or "study"
+        try:
+            if os.name == "nt":
+                import ctypes
+
+                ctypes.windll.kernel32.SetConsoleTitleW(safe_title)
+            if sys.stdout.isatty():
+                sys.stdout.write(f"\033]0;{safe_title}\007")
+                sys.stdout.flush()
+        except Exception:
+            return
 
     def _handle_zotero_webhook_event(self, payload: dict) -> None:
         event_name = str(payload.get("event") or payload.get("type") or "update").strip()[:80]
@@ -1228,6 +1341,37 @@ class StudyTUI(App):
         if self._provider and getattr(self._provider, "model", ""):
             return self._provider.model
         return self._model_name or "AI"
+
+    def _welcome_overview(self) -> dict[str, object]:
+        recent_sessions: list[dict[str, object]] = []
+        try:
+            current_session_id = self._history_mgr.session_id
+            for session in self._history_mgr.list_sessions(5):
+                if current_session_id is not None and session.get("id") == current_session_id:
+                    continue
+                recent_sessions.append(
+                    {
+                        "id": session.get("id"),
+                        "title": session.get("title") or "Untitled",
+                        "messages": session.get("messages") or 0,
+                    }
+                )
+                if len(recent_sessions) >= 4:
+                    break
+        except Exception:
+            recent_sessions = []
+
+        loaded_documents = [
+            str(doc.get("source_name") or doc.get("title") or "document")
+            for doc in self.doc_store.list_documents()[:3]
+        ]
+        return {
+            "provider": self._provider_name or "not set",
+            "model": self._active_model_label(),
+            "documents_dir": self._documents_dir,
+            "loaded_documents": loaded_documents,
+            "recent_sessions": recent_sessions,
+        }
 
     @staticmethod
     def _normalize_privacy_mode(value: str | None) -> str:
@@ -1355,6 +1499,7 @@ class StudyTUI(App):
         self._pending_study_workflow = None
         self._pending_generated_flashcards = None
         self._remote_docs_approved = False
+        self._setup_state = None
 
     def _migrate_legacy_integration_secrets(self) -> None:
         legacy_secret = self._settings.get("zotero_webhook_secret", "")
@@ -1410,6 +1555,10 @@ class StudyTUI(App):
         if entry:
             self._model_history.append(entry)
         self._log_debug("transcript_turn", {"role": role, "content": content})
+
+    @staticmethod
+    def _internal_pending_message(content: str, *, category: str = "internal") -> dict[str, str]:
+        return {"role": "system", "content": content, "category": category}
 
     async def _resolve_context_limit(self) -> int | None:
         if self._provider and hasattr(self._provider, "get_context_window_async"):
@@ -1753,12 +1902,31 @@ class StudyTUI(App):
         self._note_tool_result(name, compact_result)
         if name == "generate_flashcards":
             parsed_flashcards = None
+            json_cards = None
             if isinstance(compact_result, dict):
                 raw_result = compact_result.get("result")
                 if isinstance(raw_result, str):
                     parsed_flashcards = _parse_flashcards(raw_result)
+                    if not parsed_flashcards:
+                        try:
+                            data = json.loads(raw_result.strip())
+                            if isinstance(data, list) and data:
+                                json_cards = data
+                        except Exception:
+                            pass
+                elif isinstance(raw_result, list) and raw_result:
+                    json_cards = raw_result
             elif isinstance(compact_result, str):
                 parsed_flashcards = _parse_flashcards(compact_result)
+                if not parsed_flashcards:
+                    try:
+                        data = json.loads(compact_result.strip())
+                        if isinstance(data, list) and data:
+                            json_cards = data
+                    except Exception:
+                        pass
+            elif isinstance(compact_result, list) and compact_result:
+                json_cards = compact_result
 
             if parsed_flashcards:
                 intro_lines, cards, outro_lines = parsed_flashcards
@@ -1766,6 +1934,23 @@ class StudyTUI(App):
                     intro_lines,
                     [{"question": question, "answer": answer} for question, answer in cards],
                     outro_lines,
+                )
+            elif json_cards:
+                normalized = normalize_cards(json_cards)
+                cards = []
+                for card in normalized:
+                    preserved = dict(card)
+                    if (
+                        preserved.get("card_type") == "cloze"
+                        and not str(preserved.get("question", "")).strip()
+                        and preserved.get("cloze_text")
+                    ):
+                        preserved["question"] = str(preserved["cloze_text"])
+                    cards.append(preserved)
+                self._pending_generated_flashcards = (
+                    [],
+                    cards,
+                    [],
                 )
             return
 
@@ -2047,7 +2232,10 @@ class StudyTUI(App):
             "spawn_subagent": lambda a: f'Spawning sub-agent: {str(a.get("task", ""))[:50]}...',
             "generate_flashcards": lambda a: f'Creating {a.get("count", "")} flashcards on "{a.get("topic", "")}"...',
             "generate_quiz": lambda a: f'Generating {a.get("difficulty", "")} quiz on "{a.get("topic", "")}"...',
-            "animate_concept": lambda a: f'Rendering animation for "{a.get("topic", "concept")}" ({a.get("quality", "high")}, attempt {a.get("attempt", 1)}/3)...',
+            "animate_concept": lambda a: (
+                f'Rendering {str(a.get("backend", "manim") or "manim").replace("_", " ")} animation for '
+                f'"{a.get("topic", "concept")}" ({a.get("quality", "high")}, attempt {a.get("attempt", 1)}/3)...'
+            ),
             "summarize_document": lambda a: f'Summarizing {a.get("doc_id", a.get("section", "document"))}...',
             "list_available_files": lambda a: "Browsing available files...",
             "load_file": lambda a: f'Loading {Path(str(a.get("file_path", ""))).name or a.get("file_path", "")}...',
@@ -2059,6 +2247,10 @@ class StudyTUI(App):
             "pomodoro_start": lambda a: f'Starting {a.get("work_mins", 25)}-minute focus session...',
             "pomodoro_status": lambda a: "Checking timer status...",
             "pomodoro_stop": lambda a: "Stopping timer...",
+            "get_retention_snapshot": lambda a: "Loading retention snapshot...",
+            "get_study_preferences": lambda a: "Loading study preferences...",
+            "save_study_preferences": lambda a: "Saving study preferences...",
+            "anki_sync_recent": lambda a: f"Syncing recent cards to Anki deck '{a.get('deck_name', '')}'...",
         }
         fn = labels.get(name)
         return fn(args) if fn else f"Running {name}..."
@@ -2082,11 +2274,13 @@ class StudyTUI(App):
 
         if name == "animate_concept":
             topic = self._truncate_preview(str(args.get("topic", "concept")), 80)
+            backend = str(args.get("backend", "manim") or "manim").strip().lower().replace("-", "_")
             quality = str(args.get("quality", "high") or "high").strip().lower()
             attempt = int(args.get("attempt", 1) or 1)
             lines = [
                 "Action: render animation",
                 f"Topic: {topic}",
+                f"Backend: {backend}",
                 f"Quality: {quality}",
                 f"Attempt: {attempt}/3",
             ]
@@ -2382,6 +2576,7 @@ class StudyTUI(App):
             )
             self.doc_store.add_document(doc)
             self._update_doc_status()
+            self._log_study_event("doc_loaded", {"title": doc.title, "doc_id": doc.id, "pages": doc.total_pages, "chunks": len(doc.chunks)}, doc_id=doc.id)
             chat.add_tool_done(
                 f"Loaded {doc.title} — {doc.total_pages} pages, {len(doc.chunks)} chunks"
             )
@@ -2590,7 +2785,7 @@ class StudyTUI(App):
             self._session_prompt_tokens = 0
             self._session_completion_tokens = 0
             chat.clear_log()
-            chat.write_welcome()
+            chat.write_welcome(self._welcome_overview())
             chat.add_system_message("Chat cleared.")
             return True
 
@@ -2601,7 +2796,7 @@ class StudyTUI(App):
             self._session_completion_tokens = 0
             self._history_mgr.new_session()
             chat.clear_log()
-            chat.write_welcome()
+            chat.write_welcome(self._welcome_overview())
             chat.add_system_message("New session started.")
             return True
 
@@ -2630,7 +2825,7 @@ class StudyTUI(App):
                 self._chat_history = self._history_mgr.load_session(sid)
                 self._restore_context_state(sid)
                 chat.clear_log()
-                chat.write_welcome()
+                chat.write_welcome(self._welcome_overview())
                 for msg in self._chat_history:
                     if msg['role'] == 'user':
                         chat.add_user_message(msg['content'])
@@ -2660,6 +2855,28 @@ class StudyTUI(App):
         if text in ("/flashcards", "/summary"):
             action = text[1:]
             self.run_worker(self._run_study_action(action))
+            return True
+
+        # ── Retention-first commands ──────────────────────────────
+        if text == "/study-now":
+            self.run_worker(self._run_study_now(), exclusive=True, exit_on_error=False)
+            return True
+
+        if text == "/drill" or text.startswith("/drill "):
+            topic = text[7:].strip() or None
+            self.run_worker(self._run_drill(topic=topic), exclusive=True, exit_on_error=False)
+            return True
+
+        if text == "/study-setup":
+            self.run_worker(self._run_study_setup(), exclusive=True, exit_on_error=False)
+            return True
+
+        if text == "/study-prefs":
+            self.run_worker(self._run_study_prefs(), exclusive=True, exit_on_error=False)
+            return True
+
+        if text == "/reset-profile":
+            self.run_worker(self._run_reset_profile(), exclusive=True, exit_on_error=False)
             return True
 
         # ── Quote from last response ──────────────────────────────
@@ -2707,8 +2924,16 @@ class StudyTUI(App):
                 chat.add_error(f"Invalid spec. Use a number (1–{len(paragraphs)}) or range (2-4)")
             return True
 
+        if text.strip().lower() == "/cancel":
+            if getattr(self, "_setup_state", None) and self._setup_state.get("active"):
+                self._setup_state = None
+                chat.add_system_message("Study setup cancelled.")
+                return True
+            chat.add_system_message("Nothing to cancel.")
+            return True
+
         if text == "/help":
-            chat.write_welcome()
+            chat.write_welcome(self._welcome_overview())
             return True
 
         if text == "/continue":
@@ -2727,7 +2952,7 @@ class StudyTUI(App):
             self._chat_history = self._history_mgr.load_session(sid)
             self._restore_context_state(sid)
             chat.clear_log()
-            chat.write_welcome()
+            chat.write_welcome(self._welcome_overview())
             for msg in self._chat_history:
                 if msg['role'] == 'user':
                     chat.add_user_message(msg['content'])
@@ -2886,6 +3111,229 @@ class StudyTUI(App):
 
         return False
 
+    # ── Retention-first workers ────────────────────────────────────
+
+    async def _run_study_now(self) -> None:
+        chat = self.query_one(ChatView)
+        doc_id, title = self._current_progress_document()
+        source_hash = self._source_hash_for_doc_id(doc_id)
+        if not source_hash:
+            chat.add_system_message("No linked study progress found. Load a document first.")
+            return
+        self._log_study_event("study_now_used", doc_id=doc_id)
+        snapshot = self._progress_mgr.get_retention_snapshot(source_hash=source_hash, doc_id=doc_id, profile_id="default")
+        prefs = self._progress_mgr.get_preferences("default") or {}
+        events = self._progress_mgr.list_events(profile_id="default", limit=200)
+        profile = compute_profile(preferences=prefs, events=events, progress_snapshot=snapshot)
+        rec = recommend_study_now(progress_snapshot=snapshot, personalization_profile=profile)
+        lines = [
+            f"Recommended mode: {rec['recommended_mode']}",
+            f"Reason: {rec['reason']}",
+            f"Due: {rec['due_count']} · New: {rec['new_count']}",
+            f"Suggested session: ~{rec['suggested_session_length_minutes']} min",
+        ]
+        if rec.get("weak_topics"):
+            lines.append("Weak topics: " + ", ".join(str(w) for w in rec["weak_topics"][:4]))
+        if rec.get("next_actions"):
+            lines.append("Next actions:")
+            for action in rec["next_actions"]:
+                a = action.get("action", "")
+                if "count" in action:
+                    lines.append(f"  - {a} ({action['count']})")
+                elif "topic" in action:
+                    lines.append(f"  - {a} on {action['topic']}")
+                else:
+                    lines.append(f"  - {a}")
+        chat.add_info_block("Study Now", lines)
+        self._append_turn("assistant", "[STUDY NOW]\n" + "\n".join(lines))
+
+    async def _run_drill(self, topic: str | None = None) -> None:
+        chat = self.query_one(ChatView)
+        doc_id, title = self._current_progress_document()
+        source_hash = self._source_hash_for_doc_id(doc_id)
+        if not source_hash:
+            chat.add_system_message("No linked study progress found. Load a document first.")
+            return
+        self._log_study_event("drill_started", {"topic": topic}, doc_id=doc_id)
+        snapshot = self._progress_mgr.get_retention_snapshot(source_hash=source_hash, doc_id=doc_id, profile_id="default")
+        review = self._progress_mgr.get_review_queue(source_hash=source_hash, doc_id=doc_id, limit=100)
+        if "error" in review or not review.get("cards"):
+            chat.add_system_message("No review cards available for a drill yet.")
+            return
+        drill = build_targeted_drill(progress_snapshot=snapshot, review_queue=review, topic=topic, count=10)
+        cards = drill.get("cards", [])
+        if not cards:
+            chat.add_system_message("No matching cards found for that drill topic.")
+            return
+        self._last_flashcards.clear()
+        self._last_flashcards.extend(
+            {
+                "card_key": str(card.get("card_key", "")),
+                "question": str(card.get("question", "")),
+                "answer": str(card.get("answer", "")),
+            }
+            for card in cards
+        )
+        chat.start_flashcards(self._last_flashcards, intro_lines=[f"Drill: {drill.get('topic', 'weak areas')} — {len(cards)} cards"], review_mode=True)
+        self._append_turn("assistant", f"[DRILL STARTED] {drill.get('reason', '')}")
+
+    async def _run_study_setup(self) -> None:
+        chat = self.query_one(ChatView)
+
+        if not self._provider or not self._agent_manager:
+            chat.add_system_message("Set API key first: /key YOUR_API_KEY")
+            return
+
+        chat.add_user_message("/study-setup")
+        self._append_turn("user", "/study-setup")
+
+        # Start blind sequential setup: the model never sees the full list.
+        self._setup_state = {
+            "active": True,
+            "index": 0,
+            "answers": {},
+        }
+        first_key, first_question = _SETUP_QUESTIONS[0]
+        instruction = (
+            f"Ask the user this exact question and nothing else. "
+            f"Do not answer for them. Do not include multiple questions. "
+            f"Do not mention that there will be more questions. "
+            f"Do not call any tools.\n\n"
+            f"{first_question}"
+        )
+        chat.show_typing()
+        self._generation_worker = self.run_worker(
+            self._run_generation(
+                pending_messages=[self._internal_pending_message(instruction, category="study_setup")],
+                latest_user_text_override="/study-setup",
+                selected_tools_override=[],
+                system_prompt_override=self._system_prompt_for_tools([]),
+            ),
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    async def _run_study_prefs(self) -> None:
+        chat = self.query_one(ChatView)
+        prefs = self._progress_mgr.get_preferences("default")
+        if not prefs:
+            chat.add_system_message("No preferences saved yet. Run /study-setup to set them.")
+            return
+        lines = [f"{k}: {v}" for k, v in prefs.items() if k not in ("created_at", "updated_at")]
+        chat.add_info_block("Study Preferences", lines)
+
+    async def _run_reset_profile(self) -> None:
+        chat = self.query_one(ChatView)
+        self._progress_mgr.reset_profile_data("default")
+        chat.add_system_message("Adaptive personalization data has been reset.")
+
+    async def _handle_setup_answer(self, text: str) -> None:
+        """Process one setup answer and advance to the next question."""
+        chat = self.query_one(ChatView)
+        state = self._setup_state
+        idx = state["index"]
+        key, question = _SETUP_QUESTIONS[idx]
+        answer = text.strip()
+        if answer.lower() == "/cancel":
+            self._setup_state = None
+            chat.add_system_message("Study setup cancelled.")
+            return
+        if answer.lower() == "skip":
+            answer = ""
+        if answer:
+            state["answers"][key] = answer
+
+        next_idx = idx + 1
+        if next_idx >= len(_SETUP_QUESTIONS):
+            # Done — normalize and save all collected preferences directly
+            payload = self._normalize_setup_answers(state["answers"])
+            if payload:
+                self._progress_mgr.save_preferences("default", payload)
+            state["active"] = False
+            self._setup_state = None
+            summary = ", ".join(f"{k}={v}" for k, v in payload.items()) if payload else "none set"
+            chat.add_system_message(f"Study setup complete. Saved: {summary}")
+            return
+
+        state["index"] = next_idx
+        next_key, next_q = _SETUP_QUESTIONS[next_idx]
+        instruction = (
+            f"The user answered: '{answer or 'skipped'}'\n"
+            f"Ask the user this exact question and nothing else. "
+            f"Do not mention previous questions. Do not answer for the user. "
+            f"Do not call any tools.\n\n"
+            f"{next_q}"
+        )
+        chat.show_typing()
+        self._generation_worker = self.run_worker(
+            self._run_generation(
+                pending_messages=[self._internal_pending_message(instruction, category="study_setup")],
+                latest_user_text_override="/study-setup",
+                selected_tools_override=[],
+                system_prompt_override=self._system_prompt_for_tools([]),
+            ),
+            exclusive=True,
+            exit_on_error=False,
+        )
+
+    @staticmethod
+    def _normalize_setup_answers(answers: dict) -> dict:
+        """Map raw user answers to valid preference enum values."""
+        normalized: dict = {}
+        goal = str(answers.get("goal", "")).lower()
+        if "exam" in goal and "understand" in goal:
+            normalized["goal"] = "mixed"
+        elif "exam" in goal:
+            normalized["goal"] = "exam"
+        elif "understand" in goal or "deep" in goal:
+            normalized["goal"] = "understanding"
+
+        mode = str(answers.get("preferred_mode", "")).lower()
+        if mode in {"flashcards", "quiz", "review", "explain", "mixed"}:
+            normalized["preferred_mode"] = mode
+        elif "flash" in mode:
+            normalized["preferred_mode"] = "flashcards"
+        elif "quiz" in mode:
+            normalized["preferred_mode"] = "quiz"
+        elif "review" in mode:
+            normalized["preferred_mode"] = "review"
+        elif "explain" in mode:
+            normalized["preferred_mode"] = "explain"
+
+        style = str(answers.get("tutoring_style", "")).lower()
+        if style in {"direct", "socratic", "concept_first", "exam_first"}:
+            normalized["tutoring_style"] = style
+        elif "concept" in style:
+            normalized["tutoring_style"] = "concept_first"
+        elif "exam" in style:
+            normalized["tutoring_style"] = "exam_first"
+        elif "socrat" in style:
+            normalized["tutoring_style"] = "socratic"
+        elif "direct" in style:
+            normalized["tutoring_style"] = "direct"
+
+        length = str(answers.get("session_length_minutes", "")).lower()
+        for token in length.split():
+            try:
+                val = int(token)
+                if val > 0:
+                    normalized["session_length_minutes"] = val
+                    break
+            except ValueError:
+                continue
+
+        qstyle = str(answers.get("question_style", "")).lower()
+        if qstyle in {"recall_heavy", "mixed", "application_heavy"}:
+            normalized["question_style"] = qstyle
+        elif "recall" in qstyle:
+            normalized["question_style"] = "recall_heavy"
+        elif "applied" in qstyle or "application" in qstyle:
+            normalized["question_style"] = "application_heavy"
+        elif "mixed" in qstyle:
+            normalized["question_style"] = "mixed"
+
+        return normalized
+
     # ── Interactive Quiz ───────────────────────────────────────────
 
     async def _run_review(self, user_request: str | None = None) -> None:
@@ -2906,6 +3354,7 @@ class StudyTUI(App):
         display_text = user_request or "/review"
         chat.add_user_message(display_text)
         self._append_turn("user", display_text)
+        self._log_study_event("mode_started", {"mode": "review"}, doc_id=doc_id)
         intro_lines = [f"Reviewing your saved deck for {review.get('title') or title or 'this document'}."]
         due_count = int(review.get("due_count", 0) or 0)
         card_count = int(review.get("card_count", 0) or 0)
@@ -2951,6 +3400,8 @@ class StudyTUI(App):
         display_text = user_request or "/quiz"
         chat.add_user_message(display_text)
         self._append_turn("user", display_text)
+        doc_id, _title = self._current_progress_document()
+        self._log_study_event("mode_started", {"mode": "quiz"}, doc_id=doc_id)
         chat.add_system_message("⏳ Generating quiz questions...")
 
         try:
@@ -3082,11 +3533,12 @@ class StudyTUI(App):
         if not source_hash or not cards:
             return
         try:
+            normalized = normalize_cards(cards)
             self._progress_mgr.record_flashcards(
                 source_hash=source_hash,
                 doc_id=doc_id,
                 title=title or "Study Deck",
-                cards=cards,
+                cards=normalized,
             )
         except Exception:
             return
@@ -3108,6 +3560,30 @@ class StudyTUI(App):
         except Exception:
             return
 
+    def _log_study_event(self, event_type: str, payload: dict | None = None, doc_id: str | None = None) -> None:
+        try:
+            source_hash = self._source_hash_for_doc_id(doc_id)
+            self._progress_mgr.record_event(
+                profile_id="default",
+                event_type=event_type,
+                payload=payload or {},
+                source_hash=source_hash,
+                doc_id=doc_id,
+            )
+        except Exception:
+            pass
+
+    def _profile_steering_summary(self, doc_id: str | None = None) -> str:
+        try:
+            source_hash = self._source_hash_for_doc_id(doc_id)
+            prefs = self._progress_mgr.get_preferences("default") or {}
+            events = self._progress_mgr.list_events(profile_id="default", limit=200)
+            snapshot = self._progress_mgr.get_retention_snapshot(source_hash=source_hash, doc_id=doc_id, profile_id="default")
+            profile = compute_profile(preferences=prefs, events=events, progress_snapshot=snapshot)
+            return steering_summary(profile)
+        except Exception:
+            return ""
+
     def _animation_suggestion_for_doc(self, doc_id: str | None) -> str | None:
         source_hash = self._source_hash_for_doc_id(doc_id)
         if not source_hash:
@@ -3128,6 +3604,7 @@ class StudyTUI(App):
         chat = self.query_one(ChatView)
         status = str(result.get("status", "")).strip().lower()
         topic = str(result.get("topic", "concept")).strip() or "concept"
+        backend = str(result.get("backend", "manim") or "manim").strip().lower().replace("-", "_")
         if status == "success":
             video_path = str(result.get("video_path") or "").strip()
             code_path = str(result.get("code_path") or "").strip()
@@ -3135,6 +3612,8 @@ class StudyTUI(App):
             duration = result.get("duration_seconds")
             chat.add_tool_done(f"Rendered animation for {topic}.")
             lines = []
+            if backend:
+                lines.append(f"Backend: {backend}")
             if scene_name:
                 lines.append(f"Scene: {scene_name}")
             if duration is not None:
@@ -3147,25 +3626,29 @@ class StudyTUI(App):
                 chat.add_info_block("Animation", lines)
             self._append_turn(
                 "assistant",
-                f"[ANIMATION RENDERED] Topic: {topic}. Video: {video_path or 'n/a'}. Source: {code_path or 'n/a'}.",
+                f"[ANIMATION RENDERED] Topic: {topic}. Backend: {backend}. "
+                f"Video: {video_path or 'n/a'}. Source: {code_path or 'n/a'}.",
             )
             return
 
         error = str(result.get("error") or "Animation render failed.").strip()
         code_path = str(result.get("code_path") or "").strip()
         retryable = bool(result.get("retryable"))
+        retry_guidance = str(result.get("retry_guidance") or "").strip()
         attempt = int(result.get("attempt") or 1)
         chat.add_error(error)
-        lines = [f"Topic: {topic}", f"Attempt: {attempt}/3"]
+        lines = [f"Topic: {topic}", f"Backend: {backend}", f"Attempt: {attempt}/3"]
         if code_path:
             lines.append(f"Saved code: {code_path}")
         if retryable:
             lines.append("The agent can retry with corrected code.")
+        if retry_guidance:
+            lines.append(f"Retry hint: {retry_guidance}")
         if lines:
             chat.add_info_block("Animation", lines)
         self._append_turn(
             "assistant",
-            f"[ANIMATION FAILED] Topic: {topic}. Attempt {attempt}/3. Error: {error}"
+            f"[ANIMATION FAILED] Topic: {topic}. Backend: {backend}. Attempt {attempt}/3. Error: {error}"
             + (f" Saved code: {code_path}." if code_path else ""),
         )
 
@@ -3181,6 +3664,8 @@ class StudyTUI(App):
             f"good {event.grades.get('good', 0)}, easy {event.grades.get('easy', 0)}."
         )
         self._append_turn("assistant", summary)
+        self._log_study_event("review_session_finished", {"total": event.total, "grades": dict(event.grades)})
+        self._log_study_event("mode_completed", {"mode": "review", "total": event.total})
         if source_hash:
             try:
                 note_parts = [f"Reviewed {event.total} cards."]
@@ -3198,9 +3683,16 @@ class StudyTUI(App):
                 )
             except Exception:
                 pass
+        chat = self.query_one(ChatView)
+        if event.grades.get("again", 0) and event.total > 0:
+            again_ratio = event.grades["again"] / event.total
+            if again_ratio >= 0.3:
+                chat.add_system_message(
+                    "A lot of 'again' grades suggest a weak-area drill might help. Try /drill to target those cards."
+                )
         suggestion = self._animation_suggestion_for_doc(doc_id) if event.grades.get("again", 0) else None
         if suggestion:
-            self.query_one(ChatView).add_assistant_message(suggestion)
+            chat.add_assistant_message(suggestion)
             self._append_turn("assistant", suggestion)
         await self._build_prompt_snapshot()
         self._history_mgr.save(self._chat_history)
@@ -3269,22 +3761,48 @@ class StudyTUI(App):
 
         summary = "\n".join(lines)
         self._remember_quiz_progress(event)
+        self._log_study_event("quiz_completed", {"score": event.score, "total": event.total})
+        self._log_study_event("mode_completed", {"mode": "quiz", "score": event.score, "total": event.total})
+
+        # Recovery recommendation
+        doc_id, _title = self._current_progress_document()
+        recovery_text = ""
+        if wrong:
+            weak_topics = list({r.get("question", "") for r in wrong})
+            strong_topics = list({r.get("question", "") for r in right})
+            recovery = build_quiz_recovery_plan(
+                score=event.score,
+                total=event.total,
+                results=event.results,
+                weak_topics=weak_topics,
+                strong_topics=strong_topics,
+            )
+            recovery_lines = [
+                f"Weakest areas: {', '.join(recovery['weak_topics'][:3])}" if recovery["weak_topics"] else "",
+                f"Suggested next action: {recovery['recommended_action']}",
+            ]
+            if recovery["suggested_card_count"]:
+                recovery_lines.append(f"Generate {recovery['suggested_card_count']} {recovery['suggested_mode']} recovery cards")
+            recovery_text = "\n".join(line for line in recovery_lines if line)
 
         # Inject as a system-like user context message
         self._append_turn(
             "user",
             f"[System context — do not repeat this verbatim, but use it to help me]\n{summary}",
         )
-        self._append_turn(
-            "assistant",
+        assistant_msg = (
             f"Got it — I've noted your quiz results ({event.score}/{event.total}). "
             + ("I'll focus on the areas you struggled with. " if wrong else "Great performance! ")
-            + "Ask me anything or run another /quiz to keep practicing.",
+            + "Ask me anything or run another /quiz to keep practicing."
         )
+        if recovery_text:
+            assistant_msg += f"\n\n{recovery_text}"
+        self._append_turn("assistant", assistant_msg)
+        chat = self.query_one(ChatView)
         if wrong:
-            suggestion = self._animation_suggestion_for_doc(self._current_progress_document()[0])
+            suggestion = self._animation_suggestion_for_doc(doc_id)
             if suggestion:
-                self.query_one(ChatView).add_assistant_message(suggestion)
+                chat.add_assistant_message(suggestion)
                 self._append_turn("assistant", suggestion)
         await self._build_prompt_snapshot()
         self._history_mgr.save(self._chat_history)
@@ -3299,6 +3817,16 @@ class StudyTUI(App):
 
         if self._pending_tool_approval and not self._is_approval_command(text):
             chat.add_system_message("A write request is waiting for approval. Use /approve or /deny first.")
+            return
+
+        # Handle active study-setup: block slash commands, consume answer
+        if getattr(self, "_setup_state", None) and self._setup_state.get("active"):
+            if text.startswith("/") and text.strip().lower() != "/cancel":
+                chat.add_system_message(
+                    "Please answer the current question. Type 'skip' to skip, or /cancel to abort setup."
+                )
+                return
+            await self._handle_setup_answer(text)
             return
 
         if text.startswith("/"):
@@ -3322,7 +3850,14 @@ class StudyTUI(App):
             self._run_generation(), exclusive=True, exit_on_error=False
         )
 
-    async def _run_generation(self) -> None:
+    async def _run_generation(
+        self,
+        pending_messages: list[dict] | None = None,
+        *,
+        latest_user_text_override: str | None = None,
+        selected_tools_override: list[dict] | None = None,
+        system_prompt_override: str | None = None,
+    ) -> None:
         """Run the streaming chat completion. Runs as a Textual worker for cancellation."""
         chat = self.query_one(ChatView)
 
@@ -3335,6 +3870,9 @@ class StudyTUI(App):
         _response_started = False
         _thinking_started = False
         _raw_visible_buffer = ""
+        _visible_full_text = ""
+        _visible_streamed_chars = 0
+        _table_candidate = False
         _flashcard_candidate = False
         _structured_flashcard_expected = False
         self._pending_generated_quiz = None
@@ -3344,7 +3882,7 @@ class StudyTUI(App):
         request_sent = False
 
         def _emit_text(token: str) -> None:
-            nonlocal _response_started, _thinking_started, _typing_hidden, _raw_visible_buffer, _flashcard_candidate, _structured_flashcard_expected
+            nonlocal _response_started, _thinking_started, _typing_hidden, _raw_visible_buffer, _flashcard_candidate, _structured_flashcard_expected, _table_candidate, _visible_full_text, _visible_streamed_chars
             if _thinking_started:
                 chat.end_thinking()
                 _thinking_started = False
@@ -3357,9 +3895,17 @@ class StudyTUI(App):
                 or _structured_flashcard_expected
             ):
                 return
+            _visible_full_text += token
             _raw_visible_buffer += token
             if "[FLASHCARDS]" in _raw_visible_buffer.upper():
                 _flashcard_candidate = True
+                return
+            if (
+                _table_candidate
+                or _contains_markdown_table(_raw_visible_buffer)
+                or _contains_markdown_table_fragment(_raw_visible_buffer)
+            ):
+                _table_candidate = True
                 return
             if not _response_started:
                 if len(_raw_visible_buffer) < 320 and "\n\n" not in _raw_visible_buffer:
@@ -3368,10 +3914,13 @@ class StudyTUI(App):
                 if not _typing_hidden:
                     _typing_hidden = True
                 chat.start_response()
-                chat.stream_token(_raw_visible_buffer)
+                chat.stream_token(_normalize_terminal_output(_raw_visible_buffer))
+                _visible_streamed_chars = len(_visible_full_text)
                 _raw_visible_buffer = ""
                 return
             chat.stream_token(token)
+            _visible_streamed_chars = len(_visible_full_text)
+            _raw_visible_buffer = ""
 
         def _on_thinking(token: str) -> None:
             nonlocal _thinking_started, _typing_hidden
@@ -3405,20 +3954,26 @@ class StudyTUI(App):
         try:
             self._last_tool_result_chars = 0
             self._active_request_turn_index = self._request_turn_index + 1
-            latest_user_text = ""
-            for msg in reversed(self._chat_history):
-                if msg.get("role") == "user":
-                    latest_user_text = str(msg.get("content", ""))
-                    break
-            selected_tools = self._select_tools(latest_user_text, flow="chat")
-            request_system = self._system_prompt_for_tools(
+            latest_user_text = latest_user_text_override or ""
+            if not latest_user_text:
+                for msg in reversed(self._chat_history):
+                    if msg.get("role") == "user":
+                        latest_user_text = str(msg.get("content", ""))
+                        break
+            selected_tools = list(selected_tools_override) if selected_tools_override is not None else self._select_tools(latest_user_text, flow="chat")
+            request_system = system_prompt_override or self._system_prompt_for_tools(
                 selected_tools,
                 include_animation_skill=self._should_include_animation_skill(
                     latest_user_text,
                     flow="chat",
+                    pending_messages=pending_messages,
                 ),
             )
-            snapshot = await self._build_prompt_snapshot(selected_tools=selected_tools, system_prompt=request_system)
+            snapshot = await self._build_prompt_snapshot(
+                pending_messages=pending_messages,
+                selected_tools=selected_tools,
+                system_prompt=request_system,
+            )
             model_messages = snapshot.messages
             self._debug_log_provider_request(
                 "chat_generation",
@@ -3442,6 +3997,10 @@ class StudyTUI(App):
             self._record_usage(model_messages, request_system, full_text)
             reasoning_parser.flush()
             self._generating = False
+            normalized_full_text = _normalize_terminal_output(_visible_full_text)
+            normalized_tail_text = ""
+            if _table_candidate and _response_started:
+                normalized_tail_text = _normalize_terminal_output(_visible_full_text[_visible_streamed_chars:])
 
             if _thinking_started:
                 chat.end_thinking()
@@ -3474,6 +4033,8 @@ class StudyTUI(App):
                     intro_lines=intro_lines,
                     outro_lines=outro_lines,
                 )
+                assistant_summary = f"[FLASHCARD SESSION STARTED] Generated {len(cards)} flashcards."
+                self._append_turn("assistant", assistant_summary)
                 self._complete_pending_study_workflow("load_then_flashcards")
             elif pending_animation:
                 if _response_started:
@@ -3493,16 +4054,20 @@ class StudyTUI(App):
                     intro_lines=intro_lines,
                     outro_lines=outro_lines,
                 )
+                assistant_summary = f"[FLASHCARD SESSION STARTED] Generated {len(cards)} flashcards."
+                self._append_turn("assistant", assistant_summary)
                 self._complete_pending_study_workflow("load_then_flashcards")
             else:
                 if not _response_started:
                     chat.start_response()
                     _response_started = True
-                    if _raw_visible_buffer:
-                        chat.stream_token(_raw_visible_buffer)
+                    if _raw_visible_buffer or normalized_full_text:
+                        chat.stream_token(normalized_full_text)
                         _raw_visible_buffer = ""
+                elif normalized_tail_text:
+                    chat.stream_token(normalized_tail_text)
                 chat.end_response()
-                self._append_turn("assistant", full_text)
+                self._append_turn("assistant", normalized_full_text)
                 if self._active_pending_workflow() and self._active_pending_workflow().kind == "load_then_summary":
                     self._complete_pending_study_workflow("load_then_summary")
             await self._build_prompt_snapshot()
@@ -3573,10 +4138,10 @@ class StudyTUI(App):
             ),
             "summary": "Summarize the loaded documents comprehensively.",
             "animate": (
-                "Create a polished educational Manim animation for a high-yield concept from the loaded documents. "
+                "Create a polished educational animation for a high-yield concept from the loaded documents. "
                 "Aim for roughly 60-90 seconds, 6-10 storyboard beats, clear pacing, and no overlapping text or cluttered labels. "
-                "Use animate_concept with quality=high unless the user explicitly asks for a faster preview. "
-                "Do not paste Manim code into normal chat. "
+                "Default to animate_concept with backend=manim and quality=high unless the user explicitly asks for Motion Canvas or a faster preview. "
+                "Do not paste animation source code into normal chat. "
                 "If rendering fails with retryable=true, inspect the structured error and retry with corrected code."
             ),
         }
@@ -3737,7 +4302,7 @@ class StudyTUI(App):
     def action_clear_screen(self) -> None:
         chat = self.query_one(ChatView)
         chat.clear_log()
-        chat.write_welcome()
+        chat.write_welcome(self._welcome_overview())
 
 
 def _prompt_choice(title: str, options: list[str], default_index: int = 0) -> int:
@@ -3887,6 +4452,9 @@ def _package_available(module_name: str) -> bool:
 
 def _dependency_probe() -> dict[str, object]:
     python_has_tomllib = sys.version_info >= (3, 11)
+    motion_canvas_probe = get_motion_canvas_runtime_probe()
+    manim_error = get_animation_dependency_error()
+    motion_canvas_error = get_motion_canvas_dependency_error()
     return {
         "python": {
             "version": sys.version.split()[0],
@@ -3904,6 +4472,7 @@ def _dependency_probe() -> dict[str, object]:
             "rich": _package_available("rich"),
             "tomllib_or_tomli": python_has_tomllib or _package_available("tomli"),
             "manim": _package_available("manim"),
+            "playwright": motion_canvas_probe["playwright"],
             "genanki": _package_available("genanki"),
             "pyzotero": _package_available("pyzotero"),
             "keyring": _package_available("keyring"),
@@ -3914,12 +4483,18 @@ def _dependency_probe() -> dict[str, object]:
             "manim": shutil.which("manim") is not None,
             "latex": any(shutil.which(name) for name in ("latex", "pdflatex", "xelatex", "lualatex")),
             "dvisvgm": shutil.which("dvisvgm") is not None,
+            "node": motion_canvas_probe["node"],
+            "npm": motion_canvas_probe["npm"],
+            "motion_canvas_browser": motion_canvas_probe["browser"],
             "codex": shutil.which("codex") is not None or shutil.which("codex.cmd") is not None,
         },
         "animation": {
             "manim_available": is_manim_available(),
             "tex_available": is_tex_available(),
-            "error": get_animation_dependency_error(),
+            "manim_error": manim_error,
+            "motion_canvas_available": is_motion_canvas_available(),
+            "motion_canvas_error": motion_canvas_error,
+            "error": None if not manim_error or not motion_canvas_error else f"manim: {manim_error} | motion_canvas: {motion_canvas_error}",
         },
     }
 
@@ -3964,8 +4539,14 @@ def _print_status_summary(settings: SettingsManager | None = None) -> None:
         f"  • [bold]Web search[/bold]: "
         f"{'[green]enabled[/green]' if str(settings.get('allow_web_tools', 'false')).lower() == 'true' else '[red]disabled[/red]'}"
     )
-    animation_status = "[green]ready[/green]" if not probe["animation"]["error"] else f"[red]{probe['animation']['error']}[/red]"
-    CLI_CONSOLE.print(f"  • [bold]Animation deps[/bold]: {animation_status}")
+    animation = probe["animation"]
+    manim_status = "[green]ready[/green]" if not animation["manim_error"] else f"[red]{animation['manim_error']}[/red]"
+    motion_canvas_status = (
+        "[green]ready[/green]"
+        if not animation["motion_canvas_error"]
+        else f"[red]{animation['motion_canvas_error']}[/red]"
+    )
+    CLI_CONSOLE.print(f"  • [bold]Animation deps[/bold]: manim={manim_status} | motion_canvas={motion_canvas_status}")
 
 
 def _run_provider_cli(args: list[str]) -> int:
@@ -3981,7 +4562,7 @@ def _run_provider_cli(args: list[str]) -> int:
         table.add_column("Auth", style="yellow")
         table.add_column("Status", style="magenta")
         for provider_name in PROVIDER_CONFIGS:
-            marker = "●" if provider_name == current_provider else ""
+            marker = "*" if provider_name == current_provider else ""
             table.add_row(
                 marker,
                 PROVIDER_CONFIGS[provider_name]["display_name"] + f" ({provider_name})",
@@ -4093,8 +4674,18 @@ def _run_doctor_cli() -> int:
     CLI_CONSOLE.print("\n[bold cyan]Animation[/bold cyan]")
     CLI_CONSOLE.print(f"  • [bold]manim_available[/bold]: {'[green]ok[/green]' if animation['manim_available'] else '[red]missing[/red]'}")
     CLI_CONSOLE.print(f"  • [bold]tex_available[/bold]: {'[green]ok[/green]' if animation['tex_available'] else '[red]missing[/red]'}")
-    animation_status = "[green]ready[/green]" if not animation["error"] else f"[red]{animation['error']}[/red]"
-    CLI_CONSOLE.print(f"  • [bold]status[/bold]: {animation_status}")
+    CLI_CONSOLE.print(
+        f"  • [bold]motion_canvas_available[/bold]: "
+        f"{'[green]ok[/green]' if animation['motion_canvas_available'] else '[red]missing[/red]'}"
+    )
+    manim_status = "[green]ready[/green]" if not animation["manim_error"] else f"[red]{animation['manim_error']}[/red]"
+    motion_canvas_status = (
+        "[green]ready[/green]"
+        if not animation["motion_canvas_error"]
+        else f"[red]{animation['motion_canvas_error']}[/red]"
+    )
+    CLI_CONSOLE.print(f"  • [bold]manim_status[/bold]: {manim_status}")
+    CLI_CONSOLE.print(f"  • [bold]motion_canvas_status[/bold]: {motion_canvas_status}")
     return 0
 
 
@@ -4214,15 +4805,25 @@ def run_setup_wizard() -> None:
     except Exception:
         webhook_port = DEFAULT_ZOTERO_WEBHOOK_PORT
 
-    CLI_CONSOLE.rule("[bold cyan]Animation (Manim)[/bold cyan]")
+    CLI_CONSOLE.rule("[bold cyan]Animation[/bold cyan]")
     animation_error = get_animation_dependency_error()
+    motion_canvas_error = get_motion_canvas_dependency_error()
     if animation_error:
-        CLI_CONSOLE.print(f"  • [bold]Status[/bold]: [red]{animation_error}[/red]")
+        CLI_CONSOLE.print(f"  • [bold]Manim status[/bold]: [red]{animation_error}[/red]")
     else:
-        CLI_CONSOLE.print("  • [bold]Status[/bold]: [green]ready[/green]")
+        CLI_CONSOLE.print("  • [bold]Manim status[/bold]: [green]ready[/green]")
     CLI_CONSOLE.print(f"  • [bold]Manim binary[/bold]: {'[green]found[/green]' if is_manim_available() else '[red]missing[/red]'}")
     CLI_CONSOLE.print(f"  • [bold]TeX + dvisvgm[/bold]: {'[green]found[/green]' if is_tex_available() else '[red]missing[/red]'}")
-    CLI_CONSOLE.print("  • [dim]No extra Study TUI setting is required beyond keeping those dependencies installed.[/dim]")
+    if motion_canvas_error:
+        CLI_CONSOLE.print(f"  • [bold]Motion Canvas status[/bold]: [red]{motion_canvas_error}[/red]")
+    else:
+        CLI_CONSOLE.print("  • [bold]Motion Canvas status[/bold]: [green]ready[/green]")
+    runtime_probe = get_motion_canvas_runtime_probe()
+    CLI_CONSOLE.print(f"  • [bold]Node + npm[/bold]: {'[green]found[/green]' if runtime_probe['node'] and runtime_probe['npm'] else '[red]missing[/red]'}")
+    CLI_CONSOLE.print(f"  • [bold]Playwright[/bold]: {'[green]found[/green]' if runtime_probe['playwright'] else '[red]missing[/red]'}")
+    CLI_CONSOLE.print(
+        "  • [dim]Manim remains the stable default. Motion Canvas is available as an experimental browser-based backend.[/dim]"
+    )
 
     settings.set("provider", provider_name)
     settings.set("model", model_name)
@@ -4265,10 +4866,23 @@ def _should_auto_run_setup(settings: SettingsManager) -> bool:
     return not provider_name or not model_name
 
 
+def _build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Study TUI")
+    parser.add_argument("file", nargs="?", help="Optional document to load at startup")
+    parser.add_argument("--file", dest="file_flag", help="Optional document to load at startup")
+    parser.add_argument("--setup", action="store_true", help="Configure provider, model, documents directory, Calibre, Zotero, and animation readiness before launch")
+    parser.add_argument("--debug", action="store_true", help="Write verbose prompt, tool, and provider traces to ~/.study-tui/debug for this session")
+    return parser
+
+
 def main():
     cli_args = sys.argv[1:]
+    parser = _build_cli_parser()
     if cli_args:
         command = cli_args[0].strip().lower()
+        if command == "help":
+            parser.print_help()
+            raise SystemExit(0)
         if command == "provider":
             raise SystemExit(_run_provider_cli(cli_args[1:]))
         if command == "model":
@@ -4285,11 +4899,6 @@ def main():
                 raise SystemExit(1)
             raise SystemExit(0)
 
-    parser = argparse.ArgumentParser(description="Study TUI")
-    parser.add_argument("file", nargs="?", help="Optional document to load at startup")
-    parser.add_argument("--file", dest="file_flag", help="Optional document to load at startup")
-    parser.add_argument("--setup", action="store_true", help="Configure provider, model, documents directory, Calibre, Zotero, and animation readiness before launch")
-    parser.add_argument("--debug", action="store_true", help="Write verbose prompt, tool, and provider traces to ~/.study-tui/debug for this session")
     args = parser.parse_args()
 
     settings = SettingsManager()

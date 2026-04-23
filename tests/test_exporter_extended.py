@@ -1,47 +1,125 @@
-from __future__ import annotations
+"""Tests for exporter extended behavior (cloze, tags, source refs)."""
 
+import pytest
+import tempfile
 from pathlib import Path
 
-from src import exporter
+from src.exporter import export_flashcards
 
 
-def test_ensure_dir_and_empty_exports(tmp_path: Path) -> None:
-    custom = exporter._ensure_dir(tmp_path / "exports")
-    assert custom.exists()
-    assert exporter.export_flashcards([], export_dir=str(tmp_path)) == {"error": "No flashcards to export"}
-    assert exporter.export_summary("   ", export_dir=str(tmp_path)) == {"error": "Nothing to export"}
-    assert exporter.export_chat([], export_dir=str(tmp_path)) == {"error": "No messages to export"}
+@pytest.fixture
+def tmp_dir():
+    with tempfile.TemporaryDirectory() as d:
+        yield d
 
 
-def test_export_flashcards_markdown_and_chat_unknown_role(tmp_path: Path) -> None:
-    flashcards = exporter.export_flashcards(
-        [{"question": "What is entropy?", "answer": "A disorder measure"}],
-        fmt="markdown",
-        export_dir=str(tmp_path),
-    )
-    flashcard_text = Path(flashcards["exported"]).read_text(encoding="utf-8")
-    assert flashcards["format"] == "markdown"
-    assert "### Card 1" in flashcard_text
+class TestMarkdownExport:
+    def test_basic_cards(self, tmp_dir):
+        cards = [{"question": "Q1", "answer": "A1"}]
+        result = export_flashcards(cards, fmt="markdown", export_dir=tmp_dir)
+        assert "error" not in result
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "Q1" in text
+        assert "A1" in text
 
-    chat = exporter.export_chat(
-        [
-            {"role": "user", "content": "hi"},
-            {"role": "tool", "content": "hidden"},
-            {"role": "assistant", "content": "hello"},
-        ],
-        export_dir=str(tmp_path),
-    )
-    chat_text = Path(chat["exported"]).read_text(encoding="utf-8")
-    assert "### You" in chat_text
-    assert "### Assistant" in chat_text
-    assert "hidden" not in chat_text
+    def test_cloze_cards(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A", "card_type": "cloze", "cloze_text": "{{c1::x}}"}]
+        result = export_flashcards(cards, fmt="markdown", export_dir=tmp_dir)
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "Cloze:" in text
+        assert "{{c1::x}}" in text
+
+    def test_tags_and_refs(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A", "tags": ["physics"], "source_refs": [{"doc_id": "d1", "page": 2}]}]
+        result = export_flashcards(cards, fmt="markdown", export_dir=tmp_dir, include_source_refs=True)
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "physics" in text
+        assert "d1 p2" in text
 
 
-def test_export_flashcards_csv_and_anki_use_distinct_output_names(tmp_path: Path) -> None:
-    csv_result = exporter.export_flashcards(
-        [{"question": "Q", "answer": "A"}],
-        fmt="csv",
-        export_dir=str(tmp_path),
-    )
+class TestCsvExport:
+    def test_basic(self, tmp_dir):
+        cards = [{"question": "Q1", "answer": "A1"}]
+        result = export_flashcards(cards, fmt="csv", export_dir=tmp_dir)
+        assert "error" not in result
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "Q1" in text
+        assert "basic" in text
 
-    assert csv_result["exported"].endswith(".csv")
+    def test_cloze(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A", "card_type": "cloze", "cloze_text": "{{c1::x}}"}]
+        result = export_flashcards(cards, fmt="csv", export_dir=tmp_dir)
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "cloze" in text
+        assert "{{c1::x}}" in text
+
+
+class TestAnkiExport:
+    def test_basic_apkg(self, tmp_dir):
+        pytest.importorskip("genanki")
+        cards = [{"question": "Q1", "answer": "A1"}]
+        result = export_flashcards(cards, fmt="anki", export_dir=tmp_dir, deck_name="TestDeck")
+        assert "error" not in result
+        assert Path(result["exported"]).exists()
+        assert result["deck"] == "TestDeck"
+
+    def test_cloze_apkg(self, tmp_dir):
+        pytest.importorskip("genanki")
+        cards = [{"question": "Q", "answer": "A", "card_type": "cloze", "cloze_text": "{{c1::x}}"}]
+        result = export_flashcards(cards, fmt="anki", export_dir=tmp_dir, note_type="cloze")
+        assert "error" not in result
+        assert Path(result["exported"]).exists()
+
+    def test_missing_genanki_graceful(self, tmp_dir, monkeypatch):
+        import sys
+        monkeypatch.setitem(sys.modules, "genanki", None)
+        cards = [{"question": "Q", "answer": "A"}]
+        result = export_flashcards(cards, fmt="anki", export_dir=tmp_dir)
+        assert "error" in result
+
+
+class TestHostileExporter:
+    def test_empty_cards_returns_error(self, tmp_dir):
+        result = export_flashcards([], fmt="markdown", export_dir=tmp_dir)
+        assert "error" in result
+
+    def test_csv_formula_injection_sanitized(self, tmp_dir):
+        cards = [
+            {"question": "=2+2", "answer": "+cmd", "card_type": "basic"},
+            {"question": "Q", "answer": "A", "card_type": "cloze", "cloze_text": "={{c1::x}}"},
+        ]
+        result = export_flashcards(cards, fmt="csv", export_dir=tmp_dir)
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "'=2+2" in text
+        assert "'+cmd" in text
+        assert "'={{c1::x}}" in text
+
+    def test_csv_formula_injection_sanitizes_export_tags(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A"}]
+
+        result = export_flashcards(cards, fmt="csv", export_dir=tmp_dir, tags=["=cmd"])
+
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "'=cmd" in text
+
+    def test_very_large_deck_name(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A"}]
+        long_name = "Deck" * 500
+        result = export_flashcards(cards, fmt="markdown", export_dir=tmp_dir, deck_name=long_name)
+        assert "error" not in result
+
+    def test_mixed_card_types_in_single_export(self, tmp_dir):
+        pytest.importorskip("genanki")
+        cards = [
+            {"question": "Q1", "answer": "A1", "card_type": "basic"},
+            {"question": "Q2", "answer": "A2", "card_type": "cloze", "cloze_text": "{{c1::x}}"},
+        ]
+        result = export_flashcards(cards, fmt="anki", export_dir=tmp_dir, note_type="mixed")
+        assert "error" not in result
+        assert Path(result["exported"]).exists()
+
+    def test_source_refs_with_missing_fields(self, tmp_dir):
+        cards = [{"question": "Q", "answer": "A", "source_refs": [{}, {"page": None}, {"doc_id": ""}]}]
+        result = export_flashcards(cards, fmt="markdown", export_dir=tmp_dir, include_source_refs=True)
+        text = Path(result["exported"]).read_text(encoding="utf-8")
+        assert "Q" in text

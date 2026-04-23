@@ -26,6 +26,20 @@ The launcher opens a new PowerShell window with an isolated home directory and d
 
 ## Release Checklist
 
+### Killer demo flow
+
+Run this exact happy path before a public launch:
+
+```text
+load chapter 1 physics
+what are the main ideas here?
+quiz me on the weak points
+make flashcards from the misses
+how am i doing on this chapter?
+```
+
+If this flow is flaky, fix that before spending time on extra polish.
+
 - Startup help text renders and the input box is focused.
 - `/provider` opens the nested picker and switching providers works with keyboard only.
 - If a remote API key is configured, switching to `openai`, `anthropic`, `gemini`, `groq`, or `kimi` works without crashing.

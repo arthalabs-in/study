@@ -12,8 +12,16 @@
   - optional web search
   - Pomodoro timer
   - Calibre and Zotero integrations
+  - concept animation via Manim
   - document-linked study progress and personalized review
   - debug tracing via `--debug`
+  - first-run setup wizard and provider/model CLI helpers
+- Current launch-facing demo loop is:
+  - natural-language document load
+  - grounded Q&A
+  - quiz on weak points
+  - flashcards from misses
+  - progress continuity on the same document
 - The top-level Python package is intentionally named `src`. Keep imports as `src.*` unless packaging is being redesigned on purpose.
 - Entrypoints:
   - `study` -> `src.app:main`
@@ -27,18 +35,20 @@
 
 ## Code Map
 - `src/app.py`: main orchestration hub. CLI flags, provider setup, slash commands, document loading, generation workers, quiz/review startup, theme selection, privacy/export settings, debug wiring, and session handling.
-- `src/widgets/chat.py`: chat rendering, streaming buffers, slash-command autocomplete, nested pickers, flashcard review UI, interactive quiz UI, thinking display, and approval picker UX.
+- `src/widgets/chat.py`: chat rendering, streaming buffers, slash-command autocomplete, nested pickers, flashcard review UI, interactive quiz UI, thinking display, approval picker UX, and the transcript-rendered welcome hero/workspace shell.
+- `assets/`: launch/demo-facing raster assets, including the Study mascot images used by the welcome screen.
 - `src/agents/tools.py`: model-exposed tool schemas. Tool names/descriptions here must match router behavior.
 - `src/agents/agent_manager.py`: tool execution router for document access, exports, notes, Pomodoro, web search, study progress, Calibre, Zotero, and subagents.
-- `src/agents/provider.py`: provider registry and provider-specific chat / streaming / tool-call behavior, including Gemini/Codex quirks.
+- `src/agents/provider.py`: provider registry and provider-specific chat / streaming / tool-call behavior, including Gemini/Codex quirks, Groq support, full-toolset exposure, capped tool loops, and parallel execution for safe tool batches.
 - `src/agents/model_client.py`: compatibility wrapper around `provider.py`.
-- `src/context_engine.py`: prompt-state assembly, context compaction, pruning, token estimation, and context snapshots.
+- `src/context_engine.py`: prompt-state assembly, context compaction, age-based tool retention, token estimation, and context snapshots.
 - `src/study_progress.py`: persistent document-linked study memory, deck storage, review queue state, and progress summaries.
 - `src/debug_trace.py`: `--debug` session tracing of provider-facing context, tool calls/results, and responses.
 - `src/chat_history.py`: SQLite-backed session history and compact-memory/session metadata persistence.
 - `src/notes.py`: SQLite-backed notes storage and export helpers.
 - `src/exporter.py`: markdown / CSV / Anki export helpers.
 - `src/secure_storage.py`: settings secret storage and cross-platform encryption helpers.
+- `src/manim_renderer.py`: AST-validated guarded Manim render pipeline with timeout, tempdir isolation, TeX/runtime checks, and exported `.mp4` / `.py` artifact collection.
 - `src/parsers/doc_store.py`: in-memory document index and BM25 search.
 - `src/parsers/pdf_parser.py`: PDF parsing, chunking, figure-page detection, and rendered page images.
 - `src/parsers/image_parser.py`: image OCR pipeline. EasyOCR is lazy-loaded.
@@ -52,12 +62,26 @@
 
 ## Coordination Rules
 - Slash-command changes must update both `src/app.py` and the command/help surfaces in `src/widgets/chat.py`.
+- Welcome / splash / workspace-screen changes usually span:
+  - `src/widgets/chat.py`
+  - `src/theme.tcss`
+  - `src/app.py`
+- If a welcome-screen element is intended to remain visible after the first message, render it into the `RichLog` transcript rather than as a disposable overlay widget.
+- The welcome hero is intentionally transcript-native and scrollable. Treat it as chat content, not as persistent chrome.
 - Tool additions or schema changes must update both `src/agents/tools.py` and `src/agents/agent_manager.py`.
 - If a tool change affects model behavior or user instructions, also update the prompt and status text in `src/app.py`.
+- Provider additions or auth-mode changes usually span:
+  - `src/agents/provider.py`
+  - `src/app.py`
+  - `README.md`
+  - provider-focused tests
 - Flashcard / quiz output-format changes usually affect all three:
   - `src/app.py`
   - `src/widgets/chat.py`
   - `src/agents/agent_manager.py`
+- Flashcard handoff changes must preserve two invariants:
+  - tool-loop results for generated decks should stay full inside the active round
+  - the visible transcript should record a compact completion marker so the model knows the deck was already generated
 - Study-progress or review changes usually span:
   - `src/study_progress.py`
   - `src/app.py`
@@ -69,7 +93,14 @@
   - `src/app.py`
   - `src/agents/provider.py`
   - `src/chat_history.py`
+- Animation changes usually span:
+  - `src/manim_renderer.py`
+  - `src/agents/tools.py`
+  - `src/agents/agent_manager.py`
+  - `src/app.py`
+  - animation-related tests
 - Theme work may require both `src/theme.tcss` and hardcoded color constants in `src/widgets/chat.py`.
+- Mascot/image work should be treated as a launch-branding concern, not a general UI pattern. Keep it confined to the welcome experience unless the task explicitly expands its role.
 - Changes to chat or session semantics must be checked against both in-memory transcript/model-history handling in `src/app.py` and SQLite persistence in `src/chat_history.py`.
 - Changes to document ingestion or retrieval often span `src/parsers/pdf_parser.py`, `src/parsers/image_parser.py`, `src/parsers/doc_store.py`, and the tool layer in `src/agents/*`.
 - Calibre/Zotero changes must keep the tool layer, routing, local clients, and security assumptions in sync.
@@ -89,6 +120,7 @@
 ## Dependencies
 - Declared in `pyproject.toml`:
   - `textual`
+  - `textual-image`
   - `pymupdf`
   - `easyocr`
   - `anthropic`
@@ -98,18 +130,28 @@
   - `Pillow`
   - `rich`
   - `tomli` on Python `<3.11`
+- Also keep `requirements.txt` in sync with user-facing runtime dependencies when the install surface changes.
 - Optional extras:
   - `anki` -> `genanki`
+  - `animation` -> `manim`
   - `zotero` -> `pyzotero`
   - `dev` -> test/build tooling
 - Optional but still relevant runtime deps:
   - `keyring` for secure API key persistence if available
   - `ddgs` or `duckduckgo_search` for web search
   - `fpdf2` for notes PDF export
+- Real runtime/tooling expectations:
+  - Manim animation depends on local `manim`
+  - TeX-backed animation paths may require LaTeX plus `dvisvgm`
+  - `study doctor` is the user-facing dependency sanity check
 - EasyOCR is lazy-loaded; first OCR use may be slow or require heavyweight model setup.
+- Terminal image rendering is best-effort even with `textual-image`; the current welcome mascot path uses a half-cell renderer for consistency, not native full-raster graphics.
 
 ## Generated and Fixture Paths
 - Do not edit these by default:
+  - `tmp_*.svg`
+  - `probe-*.svg`
+  - `codex-test-output.txt`
   - `src/.ruff_cache/`
   - any `__pycache__/` directory
   - `src/study_tui.egg-info/`
@@ -123,6 +165,7 @@
 - The native file picker is currently Windows-specific because it uses PowerShell plus `System.Windows.Forms.OpenFileDialog`.
 - Clipboard copy is Windows-specific because it uses `clip.exe`.
 - The Zotero webhook is intended to remain localhost-only and single-user.
+- The app sets the terminal/window title to `study` on startup.
 - Keep Windows behavior intact unless cross-platform support is the explicit task.
 
 ## Sharp Edges
@@ -131,9 +174,18 @@
 - Document IDs come from normalized file stems plus a digest; source-linked long-term study memory is keyed by file hash, not just `doc_id`.
 - App startup creates a fresh session before optionally resuming a previous one.
 - `_chat_history` is the visible transcript; provider-facing prompt state is separately compacted through `src/context_engine.py`.
+- The selected toolset is currently persistent/full across requests. Do not assume earlier dynamic-per-turn tool gating still exists.
+- Context retention is no longer just raw history pruning; `src/context_engine.py` keeps separate retained tool artifacts with age/durability semantics.
+- Chunk/page retrieval context is intentionally kept more stable across a conversation than one-turn-only listing/search artifacts.
 - `Ctrl+L` clears the visible log only. `/clear` resets the active chat history.
 - `/resume` works from the numbered list shown by `/history`, not from a literal session ID typed by the user.
 - Theme switching mainly changes shell chrome. Some message colors inside `ChatView` are still hardcoded.
+- The welcome hero and workspace shell are intentionally written into the scrollable transcript so they remain part of history. Do not convert them back into fixed overlay widgets unless the UX is being redesigned on purpose.
+- The welcome mascot is a raster asset rendered through terminal image primitives, so it will never look identical to the source PNG in every terminal. Treat render quality complaints as runtime/UI issues, not just asset issues.
+- `textual-image` auto backend selection was not reliable enough for the welcome mascot here; the current path uses a fixed half-cell renderable.
+- Full generated flashcard decks are intentionally preserved inside the active tool loop and re-accessible via `get_recent_flashcards(limit)`. Do not reintroduce in-loop truncation for that path.
+- Provider schemas are strict on some backends (notably Groq/OpenAI-compatible ones); optional tool fields that may be omitted in practice should usually allow `null`.
+- Markdown tables are a poor fit for the current chat surface. The app now steers and normalizes output away from them.
 - `--debug` writes sensitive provider-facing context and responses to disk. Do not leave it enabled casually.
 - Linux CI packaging smoke is intentionally lighter than Windows because heavyweight OCR deps can exhaust runner disk.
 
@@ -142,6 +194,10 @@
   - `python -m compileall src tests scripts`
 - Full test suite:
   - `python -m pytest -q`
+- Chat/welcome UI regression focus:
+  - `python -m pytest tests/test_chat_widget.py -q`
+- Provider/tool-loop regression focus:
+  - `python -m pytest tests/test_provider.py tests/test_provider_extended.py tests/test_agent_manager_extended.py -q`
 - Targeted packaging smoke helper:
   - `python scripts/package_smoke.py --wheel "dist/*.whl" --method pipx-install`
   - `python scripts/package_smoke.py --wheel "dist/*.whl" --method venv-install`

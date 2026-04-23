@@ -1,16 +1,62 @@
 # Study TUI
 
-Open-source AI study cockpit for your terminal. Load PDFs and images, chat over them with any LLM, quiz yourself, generate flashcards, take notes, and export — all without leaving the keyboard.
+Terminal-native AI study cockpit for people with real document libraries.
 
+Study TUI works over the material you already have: local PDFs, image-heavy notes, Calibre books, and Zotero papers. Instead of being just another PDF chat wrapper, it turns those sources into an agentic study workflow: load a doc with natural language, ask questions, generate quizzes and flashcards, save notes, export to Anki or PDF, and keep progress tied to the document over time.
+
+[![CI](https://github.com/arthalabs-in/study/actions/workflows/ci.yml/badge.svg)](https://github.com/arthalabs-in/study/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Bring your own model](https://img.shields.io/badge/models-local%20or%20API-1f6feb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Quick links: [Features](#features) · [Install](#install) · [First Run](#first-run) · [Commands](#commands) · [Providers](#providers) · [Themes](#themes) · [Library Integrations](#library-integrations) · [Architecture](#architecture)
+Quick links: [Demo Flow](docs/launch-demo.md) · [Features](#features) · [Install](#install) · [First Run](#first-run) · [Commands](#commands) · [Providers](#providers) · [Library Integrations](#library-integrations) · [Architecture](#architecture)
 
 <p align="center">
   <img src="docs/readme/hero.svg" alt="Study TUI — loading a physics textbook and chatting with it" width="100%">
 </p>
+
+### What you can do in under a minute
+
+```text
+load chapter 1 physics
+what are the main ideas here?
+quiz me on the weak points
+make flashcards from the misses
+how am i doing on this chapter?
+```
+
+That one flow shows the whole thesis:
+- natural-language retrieval over your own library
+- structured study actions instead of disposable chat
+- progress that stays tied to the same document later
+
+If you want the exact public demo sequence, use [docs/launch-demo.md](docs/launch-demo.md).
+
+## Why it’s different
+
+- Works with your existing local library instead of forcing a new silo
+- Handles fuzzy document loading across local docs, Calibre, and Zotero
+- Turns retrieval into study actions: quiz, flashcards, notes, export, and review
+- Tracks study progress by document hash so the workflow gets more personal over time
+- Stays terminal-native, keyboard-first, and model-provider flexible
+
+## The 30-second loop
+
+```text
+1. Point Study TUI at your document directory once
+2. Type: load chapter 1 physics
+3. Ask: what are the main ideas here?
+4. Type: quiz me on the weak points
+5. Type: make flashcards from the misses
+6. Export notes or Anki cards, then come back later and /review
+```
+
+## Best for
+
+- students with large local PDF folders
+- people who already organize material in Calibre or Zotero
+- exam prep workflows that need quizzes, flashcards, notes, and export
+- terminal-first users who want local-model or bring-your-own-provider flexibility
 
 <details>
 <summary><strong>📝 Quiz Mode</strong> — AI-generated MCQs graded in real time</summary>
@@ -42,13 +88,15 @@ Quick links: [Features](#features) · [Install](#install) · [First Run](#first-
 - **Flashcards** — generate Q/A decks from any chapter or topic, review inline
 - **Summaries** — comprehensive document or section summaries
 - **Notes** — SQLite-backed persistent notes linked to documents, pages, and tags
+- **Concept animations** — generate Manim-powered explainer videos from your study material and save both the `.mp4` and source `.py`
 - **Pomodoro timer** — built-in focus timer with break management
 
 ### 📤 Export
 - **Flashcards** → Markdown, CSV, or **Anki .apkg** packages
-- **Notes** → Markdown or PDF
+- **Notes** → Markdown or PDF, including standalone LaTeX math rendered into the exported PDF
 - **Summaries** → Markdown
 - **Chat transcripts** → Markdown
+- **Animations** → exported video plus the generated Manim script
 - All writes require explicit user approval before touching disk
 
 ### 🤖 Agent System
@@ -71,9 +119,9 @@ Quick links: [Features](#features) · [Install](#install) · [First Run](#first-
 - **Token tracking** — real-time visibility into prompt/completion token usage
 
 ### 🔐 Provider Flexibility
-- **9 providers** supported out of the box
+- **10 providers** supported out of the box
 - **3 local** (Ollama, llama.cpp, LM Studio) for privacy-first workflows
-- **6 remote** (OpenAI, Anthropic, Gemini, Groq, Kimi, OpenAI Codex via ChatGPT OAuth) for maximum capability
+- **7 remote** (OpenAI, Anthropic, Gemini, Groq, Kimi, OpenAI Codex via ChatGPT OAuth, OpenCode Go) for maximum capability
 - Secure API key storage via system keyring
 - Hot-swap providers and models mid-session
 
@@ -108,9 +156,15 @@ With optional extras:
 
 ```bash
 uv sync --extra anki   # adds Anki .apkg export support
+uv sync --extra animation # adds Manim animation support
 uv sync --extra zotero # adds Zotero integration
 uv sync --extra dev    # adds pytest + coverage
 ```
+
+For concept animation support, install the Python extra and make sure your local render toolchain is ready:
+- `uv sync --extra animation`
+- install a TeX engine (`latex` / `pdflatex`) and `dvisvgm`
+- run `study doctor` to verify `manim`, LaTeX, and `dvisvgm`
 
 > **Once on PyPI** you'll be able to do `uv tool install study-tui` globally, or run without installing via `uvx study-tui`.
 
@@ -120,6 +174,7 @@ uv sync --extra dev    # adds pytest + coverage
 git clone https://github.com/arthalabs-in/study
 cd study
 pip install -e .
+pip install -e ".[animation]" # optional: Manim animation support
 pip install pyzotero          # optional: Zotero integration
 pip install -e ".[anki]"      # optional: Anki export
 ```
@@ -150,12 +205,15 @@ uv run study setup
 
 Walks you through picking a provider, setting auth, choosing a model, selecting the default documents folder, configuring Calibre, enabling the Zotero webhook, and checking Manim / TeX animation readiness. Settings are saved to `~/.study-tui/settings.json`, secrets go to `~/.study-tui/secrets.json`, and `study --setup` still launches the app automatically afterwards.
 
+On a fresh install, `study` auto-launches this setup flow the first time you start the app.
+
 API-key providers supported in the setup wizard:
 - `openai` via `OPENAI_API_KEY`
 - `anthropic` via `ANTHROPIC_API_KEY`
 - `gemini` via `GEMINI_API_KEY`
 - `groq` via `GROQ_API_KEY`
 - `kimi` via `KIMI_API_KEY`
+- `opencode-go` via `OPENCODE_API_KEY`
 
 ### Option A: Local model (private, free)
 
@@ -229,6 +287,7 @@ study setup
 | `/quiz` | Start an interactive quiz from loaded material |
 | `/flashcards` | Generate flashcard deck |
 | `/summary` | Generate document summary |
+| `/animate` | Generate a Manim animation for a concept from the current material |
 
 ### Library Integration
 | Command | Description |
@@ -270,6 +329,16 @@ study setup
 
 > You don't need to use slash commands for study actions — just say "quiz me on chapter 3" or "make flashcards about thermodynamics" and the agent handles it.
 
+Animation requests work naturally too:
+
+```text
+load keph102 and animate the difference between speed and velocity
+animate Coulomb's law as a one-minute explainer
+visualize entropy with a simple animation
+```
+
+Study TUI will ask for approval before running a local Manim render, then save both the rendered video and the generated Python source into your export directory.
+
 ---
 
 ## Providers
@@ -282,6 +351,7 @@ study setup
 | Groq | API | API key | `/provider groq` |
 | OpenAI Codex | API | ChatGPT OAuth | `/provider openai-codex` |
 | Google Gemini | API | API key | `/provider gemini` |
+| OpenCode Go | API | API key | `/provider opencode-go` |
 | Ollama | Local | None | `/provider ollama` |
 | llama.cpp | Local | None | `/provider llamacpp` |
 | LM Studio | Local | None | `/provider lmstudio` |
@@ -346,6 +416,7 @@ src/
 ├── chat_history.py         # SQLite session persistence
 ├── notes.py                # SQLite notes storage
 ├── exporter.py             # Markdown, CSV, PDF, Anki export
+├── manim_renderer.py       # Guarded Manim render pipeline for concept animations
 ├── web_search.py           # DuckDuckGo search
 ├── pomodoro.py             # Focus timer
 ├── theme.tcss              # Theme CSS for all 6 themes
@@ -380,6 +451,7 @@ src/
 - The GUI file picker uses PowerShell on Windows; Linux/macOS users can load files with `/load <path>` directly
 - Clipboard copy (`/copy`) uses `clip.exe` on Windows; on other platforms the response is printed for manual copy
 - OCR via EasyOCR — first use downloads model weights (~100 MB)
+- Manim animation support is optional and depends on local runtime tools; `study doctor` checks `manim`, LaTeX, and `dvisvgm` readiness
 
 ---
 

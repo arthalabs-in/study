@@ -56,16 +56,20 @@ def test_export_flashcards_anki_returns_clean_error_when_genanki_missing(tmp_pat
 
 def test_export_flashcards_anki_writes_apkg_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeNote:
-        def __init__(self, model, fields):
+        def __init__(self, model, fields, tags=None):
             self.model = model
             self.fields = fields
+            self.tags = tags or []
 
     class FakeModel:
-        def __init__(self, model_id, name, fields, templates):
+        CLOZE = 1
+
+        def __init__(self, model_id, name, fields, templates, model_type=None):
             self.model_id = model_id
             self.name = name
             self.fields = fields
             self.templates = templates
+            self.model_type = model_type
 
     class FakeDeck:
         def __init__(self, deck_id, name):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import json
+from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from src.agents.provider import (
     AnthropicProvider,
     MAX_TOOL_CALL_ROUNDS,
     OpenAIProvider,
+    _execute_tool_batch,
     get_provider,
     list_providers,
 )
@@ -75,6 +77,56 @@ def test_structured_flashcard_results_stay_full_inside_active_tool_loop() -> Non
     assert compacted != {"results": [{"text": "x" * 900}]}
 
 
+@pytest.mark.asyncio
+async def test_execute_tool_batch_runs_parallel_safe_tools_concurrently() -> None:
+    seen_calls = []
+    seen_results = []
+
+    async def tool_executor(name, args):
+        await asyncio.sleep(0.05)
+        return {"name": name, "args": args}
+
+    started = perf_counter()
+    results = await _execute_tool_batch(
+        [
+            {"name": "spawn_subagent", "args": {"task": "A"}},
+            {"name": "search_chunks", "args": {"query": "entropy"}},
+        ],
+        tool_executor=tool_executor,
+        on_tool_call=lambda name, args: seen_calls.append((name, args)),
+        on_tool_result=lambda name, payload: seen_results.append((name, payload)),
+    )
+    elapsed = perf_counter() - started
+
+    assert elapsed < 0.095
+    assert [item["name"] for item in results] == ["spawn_subagent", "search_chunks"]
+    assert seen_calls == [
+        ("spawn_subagent", {"task": "A"}),
+        ("search_chunks", {"query": "entropy"}),
+    ]
+    assert [name for name, _payload in seen_results] == ["spawn_subagent", "search_chunks"]
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_batch_keeps_side_effect_tools_serial() -> None:
+    async def tool_executor(name, args):
+        await asyncio.sleep(0.05)
+        return {"name": name, "args": args}
+
+    started = perf_counter()
+    results = await _execute_tool_batch(
+        [
+            {"name": "save_note", "args": {"title": "t"}},
+            {"name": "search_chunks", "args": {"query": "entropy"}},
+        ],
+        tool_executor=tool_executor,
+    )
+    elapsed = perf_counter() - started
+
+    assert elapsed >= 0.095
+    assert [item["name"] for item in results] == ["save_note", "search_chunks"]
+
+
 class FakeResponsesStream(FakeAnthropicStream):
     async def get_final_response(self):
         return self._response
@@ -109,6 +161,16 @@ def make_openai_provider(name='openai', model='gpt-4o'):
     return provider
 
 
+class CapturingAsyncOpenAI:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+class CapturingAsyncAnthropic:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
 def test_anthropic_extract_helpers() -> None:
     content = [
         SimpleNamespace(text='alpha'),
@@ -131,6 +193,66 @@ async def test_anthropic_get_models_async_success_and_fallback() -> None:
 
     provider._client = SimpleNamespace(models=SimpleNamespace(list=lambda limit=100: (_ for _ in ()).throw(RuntimeError('boom'))))
     assert await provider.get_models_async() == ['claude']
+
+
+def test_opencode_go_provider_uses_zen_endpoint_and_normalizes_prefixed_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_openai: list[CapturingAsyncOpenAI] = []
+
+    def fake_async_openai(**kwargs):
+        client = CapturingAsyncOpenAI(**kwargs)
+        captured_openai.append(client)
+        return client
+
+    monkeypatch.setattr(provider_module, "AsyncOpenAI", fake_async_openai)
+    provider = OpenAIProvider("opencode-go", api_key="token", model="opencode-go/kimi-k2.6")
+
+    assert provider.model == "kimi-k2.6"
+    assert captured_openai[0].kwargs["base_url"] == provider_module.OPENCODE_GO_BASE_URL
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_get_models_async_merges_documented_catalog_on_partial_response() -> None:
+    provider = make_openai_provider(name="opencode-go", model="kimi-k2.6")
+    provider._client = SimpleNamespace(
+        models=SimpleNamespace(
+            list=lambda: SimpleNamespace(
+                data=[SimpleNamespace(id="kimi-k2.6"), SimpleNamespace(id="glm-5.1")]
+            )
+        )
+    )
+
+    models = await provider.get_models_async()
+
+    assert "kimi-k2.6" in models
+    assert "glm-5.1" in models
+    assert "qwen3.6-plus" in models
+    assert "minimax-m2.7" in models
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_get_models_async_falls_back_to_documented_catalog() -> None:
+    provider = make_openai_provider(name="opencode-go", model="kimi-k2.6")
+    provider._client = SimpleNamespace(models=SimpleNamespace(list=lambda: (_ for _ in ()).throw(RuntimeError("boom"))))
+
+    assert await provider.get_models_async() == sorted(provider_module.OPENCODE_GO_MODELS)
+
+
+@pytest.mark.asyncio
+async def test_opencode_go_minimax_models_route_through_messages_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provider_module, "AsyncAnthropic", CapturingAsyncAnthropic)
+    provider = make_openai_provider(name="opencode-go", model="minimax-m2.7")
+    seen: list[tuple[str, str]] = []
+
+    async def fake_stream_chat(self, **kwargs):
+        seen.append((self.model, self._client.kwargs["base_url"]))
+        return "anthropic-path"
+
+    monkeypatch.setattr(provider_module.AnthropicProvider, "stream_chat", fake_stream_chat)
+
+    result = await provider.stream_chat(messages=[{"role": "user", "content": "hi"}])
+
+    assert result == "anthropic-path"
+    assert seen == [("minimax-m2.7", f"{provider_module.OPENCODE_GO_BASE_URL}/")]
 
 
 @pytest.mark.asyncio
@@ -329,9 +451,11 @@ async def test_openai_stream_chat_streaming_fallback_and_chat_tool_roundtrip() -
     nonstream_with_tools = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='final ', tool_calls=[SimpleNamespace(id='tool_2', function=SimpleNamespace(name='outline', arguments='{"doc_id":"d1"}'))]))])
     nonstream_terminal = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='answer', tool_calls=[]))])
     create_calls = {'count': 0}
+    create_kwargs = []
 
     class ChatCompletions:
         async def create(self, **kwargs):
+            create_kwargs.append(kwargs)
             if kwargs.get('stream'):
                 return FakeOpenAIStream(chunks.pop(0))
             create_calls['count'] += 1
@@ -356,6 +480,9 @@ async def test_openai_stream_chat_streaming_fallback_and_chat_tool_roundtrip() -
     assert streamed.startswith('hello ')
     assert seen_thinking == ['think']
     assert ('search', {'query': 'entropy'}) in seen_tools
+    second_stream_call = create_kwargs[1]
+    assistant_replay = next(msg for msg in second_stream_call['messages'] if msg.get('role') == 'assistant')
+    assert assistant_replay['reasoning_content'] == 'think'
 
     chatted = await provider.chat(
         messages=[{'role': 'user', 'content': 'hi'}],

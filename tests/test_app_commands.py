@@ -298,7 +298,12 @@ def test_status_cli_prints_summary(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     monkeypatch.setattr(
         app_module,
         "_dependency_probe",
-        lambda: {"animation": {"error": None}},
+        lambda: {
+            "animation": {
+                "manim_error": None,
+                "motion_canvas_error": None,
+            }
+        },
     )
 
     code = app_module._run_status_cli()
@@ -321,9 +326,24 @@ def test_doctor_cli_prints_probe(monkeypatch: pytest.MonkeyPatch, capsys: pytest
         "_dependency_probe",
         lambda: {
             "python": {"version": "3.13", "executable": "python.exe"},
-            "packages": {"textual": True, "manim": True},
-            "binaries": {"manim": True, "latex": True, "dvisvgm": True, "codex": False},
-            "animation": {"manim_available": True, "tex_available": True, "error": None},
+            "packages": {"textual": True, "manim": True, "playwright": True},
+            "binaries": {
+                "manim": True,
+                "latex": True,
+                "dvisvgm": True,
+                "node": True,
+                "npm": True,
+                "motion_canvas_browser": True,
+                "codex": False,
+            },
+            "animation": {
+                "manim_available": True,
+                "tex_available": True,
+                "manim_error": None,
+                "motion_canvas_available": True,
+                "motion_canvas_error": None,
+                "error": None,
+            },
         },
     )
 
@@ -335,6 +355,33 @@ def test_doctor_cli_prints_probe(monkeypatch: pytest.MonkeyPatch, capsys: pytest
     assert "Python packages" in out
     assert "Animation" in out
     assert "ready" in out
+
+
+def test_dependency_probe_reports_motion_canvas_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(app_module, "_package_available", lambda name: name in {"manim", "playwright"})
+    monkeypatch.setattr(app_module, "is_manim_available", lambda: True)
+    monkeypatch.setattr(app_module, "is_tex_available", lambda: True)
+    monkeypatch.setattr(app_module, "get_animation_dependency_error", lambda: None)
+    monkeypatch.setattr(app_module, "is_motion_canvas_available", lambda: True)
+    monkeypatch.setattr(app_module, "get_motion_canvas_dependency_error", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "get_motion_canvas_runtime_probe",
+        lambda: {"node": True, "npm": True, "playwright": True, "browser": True},
+    )
+    monkeypatch.setattr(
+        app_module.shutil,
+        "which",
+        lambda name: f"C:/bin/{name}.exe" if name in {"manim", "latex", "dvisvgm", "codex"} else None,
+    )
+
+    probe = app_module._dependency_probe()
+
+    assert probe["packages"]["playwright"] is True
+    assert probe["binaries"]["node"] is True
+    assert probe["binaries"]["npm"] is True
+    assert probe["animation"]["motion_canvas_available"] is True
+    assert probe["animation"]["motion_canvas_error"] is None
 
 
 def test_run_setup_wizard_configures_provider_model_and_integrations(
@@ -363,6 +410,12 @@ def test_run_setup_wizard_configures_provider_model_and_integrations(
     monkeypatch.setattr(app_module, "is_manim_available", lambda: True)
     monkeypatch.setattr(app_module, "is_tex_available", lambda: True)
     monkeypatch.setattr(app_module, "get_animation_dependency_error", lambda: None)
+    monkeypatch.setattr(app_module, "get_motion_canvas_dependency_error", lambda: None)
+    monkeypatch.setattr(
+        app_module,
+        "get_motion_canvas_runtime_probe",
+        lambda: {"node": True, "npm": True, "playwright": True, "browser": True},
+    )
     monkeypatch.setattr(app_module, "generate_webhook_secret", lambda: "generated-secret")
 
     choice_answers = iter([0, 1, 1])  # provider groq, model 2nd, theme 2nd
@@ -390,7 +443,8 @@ def test_run_setup_wizard_configures_provider_model_and_integrations(
     assert settings.values["zotero_webhook_port"] == "24124"
     assert settings.secrets["zotero_webhook_secret"]
     assert key_store.values["groq"] == "groq-api-key"
-    assert "Animation (Manim)" in out
+    assert "Animation" in out
+    assert "Motion Canvas status" in out
     assert "Saved setup" in out
 
 
@@ -408,6 +462,19 @@ def test_main_dispatches_provider_subcommand(monkeypatch: pytest.MonkeyPatch) ->
 
     assert exc.value.code == 0
     assert called["args"] == ["groq"]
+
+
+def test_main_help_alias_prints_cli_help(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(sys, "argv", ["study", "help"])
+
+    with pytest.raises(SystemExit) as exc:
+        app_module.main()
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0
+    assert "Study TUI" in out
+    assert "--setup" in out
+    assert "--debug" in out
 
 
 def test_should_auto_run_setup_when_settings_are_missing() -> None:

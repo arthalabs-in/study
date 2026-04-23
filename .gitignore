@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
+.python-version
 
 # Build and packaging outputs
 build/
@@ -29,18 +31,29 @@ tmp/
 debug-sessions/
 codex-test-output.txt
 gcm-diagnose.log
+.study-tui/
 
 # Local study material and generated media
 Documents/
 /*.pdf
 probe-*.svg
 media/
+*.apkg
+*.mp4
+*.webm
+*.mov
 
 # Local audit fixtures and planning scratch files
 src/security_audit_artifacts/
 crimson-voyager-ownership-assessment.md
 implementation_plan.md
 skills/
+
+# Local environment and editor state
+.env
+.env.*
+.vscode/
+.idea/
 
 # Archives and local exports
 *.rar

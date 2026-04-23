@@ -181,8 +181,9 @@ STUDY_TOOLS = [
             "Generate study flashcards (question/answer pairs) from document content. "
             "First search for the relevant chunks, then create flashcards. "
             "Use this whenever the user asks for flashcards in natural language; they do not need to type /flashcards. "
-            "Return flashcards in the host app's exact format: an optional short intro line, then [FLASHCARDS], then only repeated Q:/A: pairs, then [/FLASHCARDS]. "
-            "Inside the flashcard block, do not use bullets, numbering, markdown emphasis, or extra commentary."
+            "For basic mode, return flashcards in the host app's exact format: an optional short intro line, then [FLASHCARDS], then only repeated Q:/A: pairs, then [/FLASHCARDS]. "
+            "For cloze or mixed mode, return a JSON array of card objects instead. "
+            "Inside the [FLASHCARDS] block, do not use bullets, numbering, markdown emphasis, or extra commentary."
         ),
         "input_schema": {
             "type": "object",
@@ -195,6 +196,28 @@ STUDY_TOOLS = [
                     "type": "integer",
                     "description": "Number of flashcards to generate (default: 5).",
                     "default": 5,
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["basic", "cloze", "mixed"],
+                    "description": "Preferred card style.",
+                    "default": "basic",
+                },
+                "focus_topics": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                    "description": "Optional weak or target subtopics to emphasize.",
+                },
+                "focus_mode": {
+                    "type": "string",
+                    "enum": ["new_material", "weak_area", "exam_cram", "review"],
+                    "description": "Why these cards are being generated.",
+                    "default": "new_material",
+                },
+                "include_source_refs": {
+                    "type": "boolean",
+                    "description": "Whether to attach source references for each card when possible.",
+                    "default": False,
                 },
             },
             "required": ["topic"],
@@ -245,7 +268,7 @@ STUDY_TOOLS = [
                     "description": "The document to summarize. If not provided, summarizes all loaded documents.",
                 },
                 "section": {
-                    "type": "string",
+                    "type": ["string", "null"],
                     "description": "Optional specific section or topic to focus the summary on.",
                 },
             },
@@ -512,6 +535,68 @@ PROGRESS_TOOLS = [
             },
         },
     },
+    {
+        "name": "get_study_preferences",
+        "description": (
+            "Read the user's saved study preferences (goal, preferred mode, tutoring style, session length, etc.). "
+            "Use this before giving personalized recommendations."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "save_study_preferences",
+        "description": (
+            "Save or update the user's study preferences. Only use this when the user explicitly asks to change their study setup."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal": {"type": ["string", "null"], "enum": ["exam", "understanding", "mixed", None]},
+                "preferred_mode": {"type": ["string", "null"], "enum": ["flashcards", "quiz", "review", "explain", "mixed", None]},
+                "tutoring_style": {"type": ["string", "null"], "enum": ["direct", "socratic", "concept_first", "exam_first", None]},
+                "session_length_minutes": {"type": ["integer", "null"]},
+                "question_style": {"type": ["string", "null"], "enum": ["recall_heavy", "mixed", "application_heavy", None]},
+                "adaptive_enabled": {"type": ["boolean", "null"]},
+            },
+        },
+    },
+    {
+        "name": "get_retention_snapshot",
+        "description": (
+            "Get a comprehensive retention snapshot for the current document: progress, review queue stats, preferences, and recent events. "
+            "Use this when the user asks 'how am I doing?' or before building a study plan."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc_id": {
+                    "type": ["string", "null"],
+                    "description": "Optional loaded document ID. If omitted, use the current primary loaded document.",
+                },
+            },
+        },
+    },
+    {
+        "name": "anki_sync_recent",
+        "description": (
+            "Sync the latest remembered flashcards to a live Anki deck via AnkiConnect. "
+            "Requires Anki to be running with AnkiConnect. "
+            "This tool requires explicit user approval before syncing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "deck_name": {"type": "string"},
+                "note_type": {"type": "string", "enum": ["basic", "cloze"], "default": "basic"},
+                "tags": {"type": ["array", "null"], "items": {"type": "string"}},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["deck_name"],
+        },
+    },
 ]
 
 # -----------------------------------------------------------------------
@@ -563,9 +648,43 @@ EXPORT_TOOLS = [
                         "properties": {
                             "question": {"type": "string"},
                             "answer": {"type": "string"},
+                            "card_type": {"type": ["string", "null"], "enum": ["basic", "cloze", None]},
+                            "cloze_text": {"type": ["string", "null"]},
+                            "source_refs": {
+                                "type": ["array", "null"],
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "doc_id": {"type": ["string", "null"]},
+                                        "page": {"type": ["integer", "null"]},
+                                        "chunk_id": {"type": ["string", "null"]},
+                                    },
+                                },
+                            },
+                            "tags": {"type": ["array", "null"], "items": {"type": "string"}},
                         },
                     },
-                    "description": "For flashcard export: array of {question, answer} objects ready to write directly.",
+                    "description": "For flashcard export: array of card objects ready to write directly. Supports basic and cloze fields.",
+                },
+                "deck_name": {
+                    "type": ["string", "null"],
+                    "description": "For flashcard/Anki export: optional deck name.",
+                },
+                "note_type": {
+                    "type": "string",
+                    "enum": ["basic", "cloze", "mixed"],
+                    "description": "For flashcard/Anki export: note style to prefer.",
+                    "default": "basic",
+                },
+                "tags": {
+                    "type": ["array", "null"],
+                    "items": {"type": "string"},
+                    "description": "For flashcard export: tags to attach to exported cards.",
+                },
+                "include_source_refs": {
+                    "type": "boolean",
+                    "description": "For flashcard export: include source references when available.",
+                    "default": False,
                 },
                 "note_id": {
                     "type": ["integer", "null"],
@@ -746,15 +865,20 @@ ANIMATION_TOOLS = [
     {
         "name": "animate_concept",
         "description": (
-            "Generate and render a Manim animation explaining a concept. "
+            "Generate and render an educational animation explaining a concept. "
             "Use this when the user asks to animate or visualize an idea, or when a weak topic would benefit from a visual explanation. "
-            "Write complete Manim Community Edition Python code in the code field. "
+            "Choose backend=manim for the current stable Python/Manim path, or backend=motion_canvas for an experimental Motion Canvas path. "
+            "For backend=manim, write complete Manim Community Edition Python code in the code field. "
             "The code must define exactly one Scene subclass with a construct(self) method. "
             "Imports are restricted to manim, numpy, and math. "
+            "For backend=motion_canvas, write a single self-contained Motion Canvas scene file that exports a default makeScene2D(...) scene. "
+            "You may use the full @motion-canvas/* namespace; the renderer provisions referenced Motion Canvas packages into its local runtime automatically. Prefer that namespace over unrelated libraries. "
+            "Stay close to the supported scaffold: scene nodes from @motion-canvas/2d, timing/helpers and Vector2 from @motion-canvas/core, then export default makeScene2D(function* (view) { ... }). "
+            "Never call ref() before the node has been mounted. "
             "Use MathTex/Tex only for true equations or symbols. For ordinary prose, prefer Text arranged in VGroups, "
             "escape TeX special characters like &, %, _, and #, and avoid BulletedList unless every line is TeX-safe. "
             "Prefer polished educational animations over quick demo clips: roughly 60-90 seconds, 6-10 storyboard beats, slower pacing, and no overlapping text artifacts unless the user explicitly asks for a short preview. "
-            "On success, the host saves both the rendered .mp4 and the .py source. "
+            "On success, the host saves both the rendered .mp4 and the source file. "
             "If rendering fails, you will receive a structured error with retryable=true/false, error details, stderr preview, and the saved code path. "
             "Inspect that failure and call animate_concept again with corrected code when retryable is true. "
             "This tool requires explicit user approval before rendering."
@@ -769,9 +893,16 @@ ANIMATION_TOOLS = [
                 "code": {
                     "type": "string",
                     "description": (
-                        "Complete Manim Community Edition Python code defining exactly one Scene subclass. "
-                        "The scene should be self-contained, educational, and ready to render as-is."
+                        "Animation source code for the selected backend. "
+                        "For manim: complete Python defining exactly one Scene subclass. "
+                        "For motion_canvas: a self-contained scene file exporting default makeScene2D(...)."
                     ),
+                },
+                "backend": {
+                    "type": "string",
+                    "enum": ["manim", "motion_canvas"],
+                    "description": "Animation renderer backend. Use manim for the stable path, or motion_canvas for the experimental browser-based path.",
+                    "default": "manim",
                 },
                 "quality": {
                     "type": "string",

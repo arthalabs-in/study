@@ -8,7 +8,7 @@ import pytest
 
 import src.agents.agent_manager as agent_manager_module
 from src.agents.agent_manager import AgentManager
-from src.agents.tools import NOTE_TOOLS
+from src.agents.tools import ANIMATION_TOOLS, EXPORT_TOOLS, NOTE_TOOLS, STUDY_TOOLS
 from src.manim_renderer import RenderResult
 from src.notes import NotesManager
 from src.parsers.doc_store import Chunk, Document, DocStore
@@ -125,7 +125,7 @@ async def test_web_search_export_and_status_helpers(tmp_path, monkeypatch, popul
     enabled = await manager.execute_tool('web_search', {'query': 'entropy', 'max_results': 50})
     assert enabled == {'query': 'entropy', 'max_results': 10}
 
-    monkeypatch.setattr(agent_manager_module, 'export_flashcards', lambda cards, fmt='markdown', export_dir=None: {'cards': len(cards), 'fmt': fmt, 'export_dir': export_dir})
+    monkeypatch.setattr(agent_manager_module, 'export_flashcards', lambda cards, fmt='markdown', export_dir=None, **kwargs: {'cards': len(cards), 'fmt': fmt, 'export_dir': export_dir})
     monkeypatch.setattr(agent_manager_module, 'export_summary', lambda content, export_dir=None: {'summary': content})
     monkeypatch.setattr(agent_manager_module, 'export_chat', lambda msgs, export_dir=None: {'messages': len(msgs)})
     manager.notes_manager.export_notes_markdown = lambda path=None: {'notes': 'md', 'path': path}
@@ -196,6 +196,19 @@ def test_note_tool_filters_allow_null_values_in_schema() -> None:
     assert "null" in list_notes_schema["tag"]["type"]
 
 
+def test_summarize_document_section_allows_null_in_schema() -> None:
+    summarize_schema = next(tool for tool in STUDY_TOOLS if tool["name"] == "summarize_document")["input_schema"]["properties"]
+    assert "null" in summarize_schema["section"]["type"]
+
+
+def test_export_content_schema_declares_flashcard_metadata_fields() -> None:
+    export_schema = next(tool for tool in EXPORT_TOOLS if tool["name"] == "export_content")["input_schema"]["properties"]
+    assert export_schema["deck_name"]["type"] == ["string", "null"]
+    assert export_schema["note_type"]["enum"] == ["basic", "cloze", "mixed"]
+    assert export_schema["tags"]["type"] == ["array", "null"]
+    assert export_schema["include_source_refs"]["type"] == "boolean"
+
+
 @pytest.mark.asyncio
 async def test_flashcards_export_uses_last_generated_cards_and_documents_dir(tmp_path) -> None:
     store = DocStore()
@@ -243,7 +256,7 @@ async def test_flashcards_anki_export_uses_last_generated_cards(tmp_path) -> Non
     )
     manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
     original_export_flashcards = agent_manager_module.export_flashcards
-    agent_manager_module.export_flashcards = lambda cards, fmt='markdown', export_dir=None: {
+    agent_manager_module.export_flashcards = lambda cards, fmt='markdown', export_dir=None, **kwargs: {
         'count': len(cards),
         'format': fmt,
         'exported': str(Path(export_dir or tmp_path) / 'flashcards.apkg'),
@@ -342,5 +355,77 @@ async def test_animate_concept_success_and_failure_shapes(monkeypatch, tmp_path)
     assert failure['retryable'] is True
     assert failure['attempt'] == 2
     assert failure['code_path'].endswith('broken.py')
+
+
+@pytest.mark.asyncio
+async def test_animate_concept_motion_canvas_backend(monkeypatch, tmp_path) -> None:
+    manager = AgentManager(doc_store=DocStore(), provider=DummyProvider(), default_export_dir=tmp_path)
+    manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
+    monkeypatch.setattr(agent_manager_module, 'get_motion_canvas_dependency_error', lambda: None)
+
+    async def fake_render_motion_canvas(code, *, export_dir=None, quality='low', timeout=180):
+        return RenderResult(
+            success=True,
+            video_path=str(tmp_path / 'motion.mp4'),
+            code_path=str(tmp_path / 'motion.tsx'),
+            scene_name='MotionCanvasScene',
+            duration_seconds=2.1,
+        )
+
+    monkeypatch.setattr(agent_manager_module, 'render_motion_canvas_animation', fake_render_motion_canvas)
+    result = await manager.execute_tool(
+        'animate_concept',
+        {
+            'topic': 'electric field',
+            'backend': 'motion_canvas',
+            'code': "import {makeScene2D} from '@motion-canvas/2d'; export default makeScene2D(function* () {});",
+            'quality': 'high',
+        },
+    )
+
+    assert result['status'] == 'success'
+    assert result['backend'] == 'motion_canvas'
+    assert result['video_path'].endswith('motion.mp4')
+
+
+@pytest.mark.asyncio
+async def test_animate_concept_motion_canvas_failure_includes_retry_guidance(monkeypatch, tmp_path) -> None:
+    manager = AgentManager(doc_store=DocStore(), provider=DummyProvider(), default_export_dir=tmp_path)
+    manager.request_tool_approval = lambda name, args: __import__('asyncio').sleep(0, result=True)
+    monkeypatch.setattr(agent_manager_module, 'get_motion_canvas_dependency_error', lambda: None)
+
+    async def fake_render_motion_canvas(code, *, export_dir=None, quality='low', timeout=180):
+        return RenderResult(
+            success=False,
+            error="Motion Canvas browser error: The requested module '/@fs/.../@motion-canvas_2d.js' does not provide an export named 'Vector2'",
+            stderr="Motion Canvas browser error: The requested module '/@fs/.../@motion-canvas_2d.js' does not provide an export named 'Vector2'",
+            code_path=str(tmp_path / 'broken.tsx'),
+            scene_name='MotionCanvasScene',
+            duration_seconds=1.8,
+        )
+
+    monkeypatch.setattr(agent_manager_module, 'render_motion_canvas_animation', fake_render_motion_canvas)
+    result = await manager.execute_tool(
+        'animate_concept',
+        {
+            'topic': 'electric field',
+            'backend': 'motion_canvas',
+            'code': "import {makeScene2D, Vector2} from '@motion-canvas/2d'; export default makeScene2D(function* () {});",
+            'quality': 'high',
+            'attempt': 1,
+        },
+    )
+
+    assert result['status'] == 'error'
+    assert result['retryable'] is True
+    assert "retry_guidance" in result
+    assert "Vector2" in result['retry_guidance']
+    assert "@motion-canvas/core" in result['retry_guidance']
+
+
+def test_animate_concept_schema_supports_backend_selection() -> None:
+    animate_schema = next(tool for tool in ANIMATION_TOOLS if tool["name"] == "animate_concept")["input_schema"]["properties"]
+    assert animate_schema["backend"]["default"] == "manim"
+    assert "motion_canvas" in animate_schema["backend"]["enum"]
 
 

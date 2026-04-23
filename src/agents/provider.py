@@ -33,6 +33,32 @@ _TOOL_TEXT_LIMIT = 500
 _TOOL_LIST_LIMIT = 6
 MAX_TOOL_CALL_ROUNDS = 25
 _FULL_TOOL_LOOP_RESULT_NAMES = {"generate_flashcards", "generate_quiz", "get_recent_flashcards"}
+OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+OPENCODE_GO_MODEL_PREFIX = "opencode-go/"
+OPENCODE_GO_MODELS = (
+    "glm-5.1",
+    "glm-5",
+    "kimi-k2.5",
+    "kimi-k2.6",
+    "mimo-v2-pro",
+    "mimo-v2-omni",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+)
+OPENCODE_GO_ANTHROPIC_MODELS = {"minimax-m2.7", "minimax-m2.5"}
+_SERIAL_TOOL_EXECUTION_NAMES = {
+    "save_note",
+    "export_content",
+    "animate_concept",
+    "load_file",
+    "calibre_load",
+    "zotero_load",
+    "save_progress_note",
+    "pomodoro_start",
+    "pomodoro_stop",
+}
 
 
 # ── Provider registry ───────────────────────────────────────────────
@@ -128,6 +154,16 @@ PROVIDER_CONFIGS: dict[str, dict] = {
         "supports_thinking": False,
         "supports_tools": True,
     },
+    "opencode-go": {
+        "display_name": "OpenCode Go",
+        "family": "openai",
+        "base_url": OPENCODE_GO_BASE_URL,
+        "default_model": "kimi-k2.6",
+        "env_key": "OPENCODE_API_KEY",
+        "auth_mode": "api_key",
+        "supports_thinking": False,
+        "supports_tools": True,
+    },
 }
 
 KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
@@ -145,7 +181,66 @@ KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
     "gemini-2.5-pro": 1048576,
     "llama3.2": 131072,
     "local-model": 32768,
+    "kimi-k2.6": 128000,
+    "opencode-go/kimi-k2.6": 128000,
 }
+
+
+async def _execute_tool_batch(
+    tool_calls: list[dict[str, Any]],
+    *,
+    tool_executor: Callable | None = None,
+    on_tool_call: Callable | None = None,
+    on_tool_result: Callable | None = None,
+) -> list[dict[str, Any]]:
+    for tool_call in tool_calls:
+        if on_tool_call:
+            on_tool_call(tool_call["name"], tool_call["args"])
+
+    async def run_one(tool_call: dict[str, Any]) -> Any:
+        if not tool_executor:
+            return {"error": f"No executor for {tool_call['name']}"}
+        try:
+            return await tool_executor(tool_call["name"], tool_call["args"])
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    allow_parallel = len(tool_calls) > 1 and all(
+        str(tool_call.get("name", "")).strip() not in _SERIAL_TOOL_EXECUTION_NAMES
+        for tool_call in tool_calls
+    )
+    if allow_parallel:
+        raw_results = await asyncio.gather(*(run_one(tool_call) for tool_call in tool_calls))
+    else:
+        raw_results = []
+        for tool_call in tool_calls:
+            raw_results.append(await run_one(tool_call))
+
+    executed: list[dict[str, Any]] = []
+    for tool_call, raw_result in zip(tool_calls, raw_results):
+        compact_result = AnthropicProvider._tool_result_for_active_loop(tool_call["name"], raw_result)
+        if on_tool_result:
+            on_tool_result(tool_call["name"], compact_result)
+        executed.append(
+            {
+                "name": tool_call["name"],
+                "args": tool_call["args"],
+                "raw_result": raw_result,
+                "result": compact_result,
+                "id": tool_call.get("id", ""),
+                "call_id": tool_call.get("call_id", ""),
+            }
+    )
+    return executed
+
+
+def _safe_json_tool_args(raw_arguments: str | None) -> dict[str, Any]:
+    if not raw_arguments:
+        return {}
+    try:
+        return json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        return {}
 
 
 # ── Base class ──────────────────────────────────────────────────────
@@ -413,20 +508,21 @@ class AnthropicProvider(LLMProvider):
                 })
 
                 tool_results = []
-                for tc in tool_calls:
-                    if on_tool_call:
-                        on_tool_call(tc["name"], tc["input"])
-                    if tool_executor:
-                        result = await tool_executor(tc["name"], tc["input"])
-                    else:
-                        result = {"error": f"No executor for {tc['name']}"}
-                    compact_result = self._tool_result_for_active_loop(tc["name"], result)
-                    if on_tool_result:
-                        on_tool_result(tc["name"], compact_result)
+                executed_calls = await _execute_tool_batch(
+                    [
+                        {"id": tc["id"], "name": tc["name"], "args": tc["input"]}
+                        for tc in tool_calls
+                    ],
+                    tool_executor=tool_executor,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                for executed in executed_calls:
+                    compact_result = executed["result"]
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
                     tool_results.append({
                         "type": "tool_result",
-                        "tool_use_id": tc["id"],
+                        "tool_use_id": executed["id"],
                         "content": result_str,
                     })
 
@@ -486,20 +582,21 @@ class AnthropicProvider(LLMProvider):
                     ],
                 })
                 tool_results = []
-                for tc in tool_calls:
-                    if on_tool_call:
-                        on_tool_call(tc["name"], tc["input"])
-                    if tool_executor:
-                        result = await tool_executor(tc["name"], tc["input"])
-                    else:
-                        result = {"error": f"No executor for {tc['name']}"}
-                    compact_result = self._tool_result_for_active_loop(tc["name"], result)
-                    if on_tool_result:
-                        on_tool_result(tc["name"], compact_result)
+                executed_calls = await _execute_tool_batch(
+                    [
+                        {"id": tc["id"], "name": tc["name"], "args": tc["input"]}
+                        for tc in tool_calls
+                    ],
+                    tool_executor=tool_executor,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                for executed in executed_calls:
+                    compact_result = executed["result"]
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
                     tool_results.append({
                         "type": "tool_result",
-                        "tool_use_id": tc["id"],
+                        "tool_use_id": executed["id"],
                         "content": result_str,
                     })
                 working_messages.append({"role": "user", "content": tool_results})
@@ -524,7 +621,8 @@ class OpenAIProvider(LLMProvider):
         cfg = PROVIDER_CONFIGS[name]
         self.name = name
         self.display_name = cfg["display_name"]
-        self.model = model or cfg["default_model"]
+        initial_model = model or cfg["default_model"]
+        self.model = self._normalize_model_name(name, initial_model)
         self.api_key = api_key or ""
         self.auth_mode = cfg.get("auth_mode", "api_key" if cfg.get("env_key") else "none")
         self.supports_thinking = cfg["supports_thinking"]
@@ -535,6 +633,36 @@ class OpenAIProvider(LLMProvider):
         if url:
             kwargs["base_url"] = url
         self._client = AsyncOpenAI(**kwargs)
+
+    @staticmethod
+    def _normalize_model_name(provider_name: str, model: str | None) -> str:
+        normalized = str(model or "").strip()
+        if provider_name == "opencode-go" and normalized.startswith(OPENCODE_GO_MODEL_PREFIX):
+            return normalized[len(OPENCODE_GO_MODEL_PREFIX):]
+        return normalized
+
+    def _uses_opencode_go_messages_api(self) -> bool:
+        return self.name == "opencode-go" and self.model in OPENCODE_GO_ANTHROPIC_MODELS
+
+    def _make_opencode_go_messages_delegate(self) -> AnthropicProvider:
+        # MiniMax models on OpenCode Go use the Anthropic-style /messages endpoint.
+        return AnthropicProvider(
+            name="anthropic",
+            api_key=self.api_key,
+            model=self.model,
+            base_url=f"{OPENCODE_GO_BASE_URL}/",
+        )
+
+    def _merge_model_catalog(
+        self,
+        discovered: list[str] | set[str],
+        fallback: list[str] | tuple[str, ...] = (),
+    ) -> list[str]:
+        models = {str(model).strip() for model in discovered if str(model).strip()}
+        models.update(str(model).strip() for model in fallback if str(model).strip())
+        if self.model:
+            models.add(self.model)
+        return sorted(models)
 
     @staticmethod
     def _codex_executable() -> str:
@@ -1141,22 +1269,20 @@ class OpenAIProvider(LLMProvider):
             tool_calls = self._extract_gemini_function_calls(candidate)
             if tool_calls:
                 function_response_parts: list[dict[str, Any]] = []
-                for tool_call in tool_calls:
-                    fn_name = tool_call["name"]
-                    fn_args = tool_call["args"]
-                    if on_tool_call:
-                        on_tool_call(fn_name, fn_args)
-                    if tool_executor:
-                        result = await tool_executor(fn_name, fn_args)
-                    else:
-                        result = {"error": f"No executor for {fn_name}"}
-                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
-                    if on_tool_result:
-                        on_tool_result(fn_name, compact_result)
+                executed_calls = await _execute_tool_batch(
+                    [
+                        {"name": tool_call["name"], "args": tool_call["args"]}
+                        for tool_call in tool_calls
+                    ],
+                    tool_executor=tool_executor,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                for executed in executed_calls:
                     function_response_parts.append({
                         "functionResponse": {
-                            "name": fn_name,
-                            "response": {"result": compact_result},
+                            "name": executed["name"],
+                            "response": {"result": executed["result"]},
                         }
                     })
                 contents.append({"role": "user", "parts": function_response_parts})
@@ -1287,24 +1413,25 @@ class OpenAIProvider(LLMProvider):
                 return full_text or self._extract_response_text(response)
 
             pending_input = []
-            for tool_call in tool_calls:
-                try:
-                    fn_args = json.loads(tool_call["arguments"]) if tool_call["arguments"] else {}
-                except json.JSONDecodeError:
-                    fn_args = {}
-                if on_tool_call:
-                    on_tool_call(tool_call["name"], fn_args)
-                if tool_executor:
-                    result = await tool_executor(tool_call["name"], fn_args)
-                else:
-                    result = {"error": f"No executor for {tool_call['name']}"}
-                compact_result = AnthropicProvider._tool_result_for_active_loop(tool_call["name"], result)
-                if on_tool_result:
-                    on_tool_result(tool_call["name"], compact_result)
+            executed_calls = await _execute_tool_batch(
+                [
+                    {
+                        "call_id": tool_call["call_id"],
+                        "name": tool_call["name"],
+                        "args": _safe_json_tool_args(tool_call["arguments"]),
+                    }
+                    for tool_call in tool_calls
+                ],
+                tool_executor=tool_executor,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+            )
+            for executed in executed_calls:
+                compact_result = executed["result"]
                 result_str = json.dumps(compact_result) if isinstance(compact_result, (dict, list)) else str(compact_result)
                 pending_input.append({
                     "type": "function_call_output",
-                    "call_id": tool_call["call_id"],
+                    "call_id": executed["call_id"],
                     "output": result_str,
                 })
 
@@ -1341,11 +1468,13 @@ class OpenAIProvider(LLMProvider):
 
         try:
             response = await self._client.models.list()
-            models = sorted({m.id for m in response.data if getattr(m, "id", None)})
-            if self.model not in models:
-                models.append(self.model)
-            return models
+            models = [m.id for m in response.data if getattr(m, "id", None)]
+            if self.name == "opencode-go":
+                return self._merge_model_catalog(models, OPENCODE_GO_MODELS)
+            return self._merge_model_catalog(models)
         except Exception:
+            if self.name == "opencode-go":
+                return self._merge_model_catalog([], OPENCODE_GO_MODELS)
             return [self.model]
 
     # ── streaming ──
@@ -1379,6 +1508,19 @@ class OpenAIProvider(LLMProvider):
                 messages=messages,
                 system=system,
                 on_text=on_text,
+            )
+        if self._uses_opencode_go_messages_api():
+            delegate = self._make_opencode_go_messages_delegate()
+            return await delegate.stream_chat(
+                messages=messages,
+                tools=tools,
+                tool_executor=tool_executor,
+                system=system,
+                max_tokens=max_tokens,
+                on_text=on_text,
+                on_thinking=on_thinking,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
             )
         if self.name == "gemini" and tools and self.supports_tools:
             return await self._run_via_gemini_tools(
@@ -1420,6 +1562,7 @@ class OpenAIProvider(LLMProvider):
                 kwargs["tools"] = openai_tools
 
             round_text = ""
+            round_reasoning = ""
             tool_calls_accum: dict[int, dict] = {}  # index -> {id, name, arguments}
 
             try:
@@ -1445,6 +1588,8 @@ class OpenAIProvider(LLMProvider):
                         reasoning_text = self._extract_reasoning_text(getattr(delta, "summary", None))
                     if reasoning_text and on_thinking:
                         on_thinking(reasoning_text)
+                    if reasoning_text:
+                        round_reasoning += reasoning_text
 
                     # Tool calls (streamed incrementally)
                     if delta.tool_calls:
@@ -1474,6 +1619,13 @@ class OpenAIProvider(LLMProvider):
                     full_text += round_text
                     if on_text:
                         on_text(round_text)
+                round_reasoning = self._extract_reasoning_text(getattr(msg, "reasoning_content", None))
+                if not round_reasoning:
+                    round_reasoning = self._extract_reasoning_text(getattr(msg, "reasoning", None))
+                if not round_reasoning:
+                    round_reasoning = self._extract_reasoning_text(getattr(msg, "summary", None))
+                if round_reasoning and on_thinking:
+                    on_thinking(round_reasoning)
                 if msg.tool_calls:
                     for i, tc in enumerate(msg.tool_calls):
                         tool_calls_accum[i] = {
@@ -1497,34 +1649,34 @@ class OpenAIProvider(LLMProvider):
                         },
                     })
 
-                working_messages.append({
+                assistant_message = {
                     "role": "assistant",
                     "content": round_text or None,
                     "tool_calls": assistant_tool_calls,
-                })
+                }
+                if round_reasoning:
+                    assistant_message["reasoning_content"] = round_reasoning
+                working_messages.append(assistant_message)
 
-                for tc_data in tool_calls_accum.values():
-                    fn_name = tc_data["name"]
-                    try:
-                        fn_args = json.loads(tc_data["arguments"]) if tc_data["arguments"] else {}
-                    except json.JSONDecodeError:
-                        fn_args = {}
-
-                    if on_tool_call:
-                        on_tool_call(fn_name, fn_args)
-
-                    if tool_executor:
-                        result = await tool_executor(fn_name, fn_args)
-                    else:
-                        result = {"error": f"No executor for {fn_name}"}
-
-                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
-                    if on_tool_result:
-                        on_tool_result(fn_name, compact_result)
+                executed_calls = await _execute_tool_batch(
+                    [
+                        {
+                            "id": tc_data["id"],
+                            "name": tc_data["name"],
+                            "args": _safe_json_tool_args(tc_data["arguments"]),
+                        }
+                        for tc_data in tool_calls_accum.values()
+                    ],
+                    tool_executor=tool_executor,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                for executed in executed_calls:
+                    compact_result = executed["result"]
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
                     working_messages.append({
                         "role": "tool",
-                        "tool_call_id": tc_data["id"],
+                        "tool_call_id": executed["id"],
                         "content": result_str,
                     })
 
@@ -1564,6 +1716,17 @@ class OpenAIProvider(LLMProvider):
                 system=system,
                 on_text=None,
             )
+        if self._uses_opencode_go_messages_api():
+            delegate = self._make_opencode_go_messages_delegate()
+            return await delegate.chat(
+                messages=messages,
+                tools=tools,
+                tool_executor=tool_executor,
+                system=system,
+                max_tokens=max_tokens,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+            )
         if self.name == "gemini" and tools and self.supports_tools:
             return await self._run_via_gemini_tools(
                 messages=messages,
@@ -1601,35 +1764,43 @@ class OpenAIProvider(LLMProvider):
 
             if msg.content:
                 full_text += msg.content
+            round_reasoning = self._extract_reasoning_text(getattr(msg, "reasoning_content", None))
+            if not round_reasoning:
+                round_reasoning = self._extract_reasoning_text(getattr(msg, "reasoning", None))
+            if not round_reasoning:
+                round_reasoning = self._extract_reasoning_text(getattr(msg, "summary", None))
 
             if msg.tool_calls:
-                working_messages.append({
+                assistant_message = {
                     "role": "assistant",
                     "content": msg.content,
                     "tool_calls": [
                         {"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                         for tc in msg.tool_calls
                     ],
-                })
-                for tc in msg.tool_calls:
-                    fn_name = tc.function.name
-                    try:
-                        fn_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                    except json.JSONDecodeError:
-                        fn_args = {}
-                    if on_tool_call:
-                        on_tool_call(fn_name, fn_args)
-                    if tool_executor:
-                        result = await tool_executor(fn_name, fn_args)
-                    else:
-                        result = {"error": f"No executor for {fn_name}"}
-                    compact_result = AnthropicProvider._tool_result_for_active_loop(fn_name, result)
-                    if on_tool_result:
-                        on_tool_result(fn_name, compact_result)
+                }
+                if round_reasoning:
+                    assistant_message["reasoning_content"] = round_reasoning
+                working_messages.append(assistant_message)
+                executed_calls = await _execute_tool_batch(
+                    [
+                        {
+                            "id": tc.id,
+                            "name": tc.function.name,
+                            "args": _safe_json_tool_args(tc.function.arguments),
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                    tool_executor=tool_executor,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
+                for executed in executed_calls:
+                    compact_result = executed["result"]
                     result_str = json.dumps(compact_result, ensure_ascii=False) if isinstance(compact_result, (dict, list)) else str(compact_result)
                     working_messages.append({
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": executed["id"],
                         "content": result_str,
                     })
                 continue

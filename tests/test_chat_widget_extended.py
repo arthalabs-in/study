@@ -196,6 +196,10 @@ async def test_autocomplete_completion_picker_and_key_navigation() -> None:
 
         inp.value = '/provider'
         await pilot.pause()
+        assert options.display is True
+        assert app.messages == []
+        chat._complete_suggestion()
+        await pilot.pause()
         assert app.messages[-1] == '/provider'
 
         chat.show_nested_picker('Choose provider', [('provider:openai', ' openai', '/provider openai')])

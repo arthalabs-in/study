@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from src.secure_storage import decrypt_text, encrypt_text
+from src.card_formats import normalize_cards, card_payload_hash
 
 
 DB_PATH = Path.home() / ".study-tui" / "progress.db"
@@ -164,6 +165,57 @@ class StudyProgressManager:
                 created_at       REAL NOT NULL
             );
 
+            -- Retention system tables (additive)
+            CREATE TABLE IF NOT EXISTS card_metadata (
+                source_hash TEXT NOT NULL REFERENCES sources(source_hash) ON DELETE CASCADE,
+                card_key TEXT NOT NULL,
+                doc_id TEXT,
+                title TEXT NOT NULL,
+                card_type TEXT NOT NULL DEFAULT 'basic',
+                cloze_text TEXT,
+                source_refs TEXT NOT NULL DEFAULT '[]',
+                tags TEXT NOT NULL DEFAULT '[]',
+                focus TEXT NOT NULL DEFAULT 'new_material',
+                difficulty TEXT,
+                payload_hash TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (source_hash, card_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS anki_sync_state (
+                source_hash TEXT NOT NULL REFERENCES sources(source_hash) ON DELETE CASCADE,
+                card_key TEXT NOT NULL,
+                anki_note_id TEXT,
+                deck_name TEXT,
+                note_type TEXT,
+                payload_hash TEXT,
+                last_synced_at REAL,
+                PRIMARY KEY (source_hash, card_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS study_preferences (
+                profile_id TEXT PRIMARY KEY,
+                goal TEXT,
+                preferred_mode TEXT,
+                tutoring_style TEXT,
+                session_length_minutes INTEGER,
+                question_style TEXT,
+                integrations_json TEXT NOT NULL DEFAULT '[]',
+                adaptive_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS study_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id TEXT NOT NULL,
+                source_hash TEXT,
+                doc_id TEXT,
+                event_type TEXT NOT NULL,
+                event_payload_json TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_sources_doc_id ON sources(doc_id);
             CREATE INDEX IF NOT EXISTS idx_flashcard_source ON flashcard_decks(source_hash, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_quiz_source ON quiz_attempts(source_hash, created_at DESC);
@@ -171,6 +223,8 @@ class StudyProgressManager:
             CREATE INDEX IF NOT EXISTS idx_linked_notes_source ON linked_notes(source_hash, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_card_states_source_due ON card_states(source_hash, due_at ASC);
             CREATE INDEX IF NOT EXISTS idx_flashcard_reviews_source ON flashcard_reviews(source_hash, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_study_events_profile ON study_events(profile_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_study_events_type ON study_events(event_type, created_at DESC);
         """)
 
     @staticmethod
@@ -184,6 +238,60 @@ class StudyProgressManager:
         except Exception:
             return []
         return [str(value) for value in data if str(value).strip()]
+
+    @staticmethod
+    def _encode_source_refs(source_refs: list[dict] | None) -> str:
+        normalized: list[dict[str, Any]] = []
+        for ref in source_refs or []:
+            if not isinstance(ref, dict):
+                continue
+            item: dict[str, Any] = {}
+            raw_doc_id = ref.get("doc_id")
+            if raw_doc_id is not None:
+                doc_id = str(raw_doc_id).strip()
+                if doc_id:
+                    item["doc_id"] = doc_id
+            page = ref.get("page")
+            if page is not None:
+                try:
+                    item["page"] = int(page)
+                except (TypeError, ValueError):
+                    page = None
+            raw_chunk_id = ref.get("chunk_id")
+            if raw_chunk_id is not None:
+                chunk_id = str(raw_chunk_id).strip()
+                if chunk_id:
+                    item["chunk_id"] = chunk_id
+            if item:
+                normalized.append(item)
+        return json.dumps(normalized, ensure_ascii=False)
+
+    @staticmethod
+    def _decode_source_refs(payload: str) -> list[dict[str, Any]]:
+        try:
+            data = json.loads(payload or "[]")
+        except Exception:
+            return []
+        refs: list[dict[str, Any]] = []
+        for ref in data if isinstance(data, list) else []:
+            if not isinstance(ref, dict):
+                continue
+            item: dict[str, Any] = {}
+            doc_id = str(ref.get("doc_id", "")).strip()
+            if doc_id:
+                item["doc_id"] = doc_id
+            page = ref.get("page")
+            if page is not None:
+                try:
+                    item["page"] = int(page)
+                except (TypeError, ValueError):
+                    page = None
+            chunk_id = str(ref.get("chunk_id", "")).strip()
+            if chunk_id:
+                item["chunk_id"] = chunk_id
+            if item:
+                refs.append(item)
+        return refs
 
     @staticmethod
     def _encrypt_json(payload: Any) -> str:
@@ -269,7 +377,8 @@ class StudyProgressManager:
         cards: list[dict[str, str]],
     ) -> dict:
         now = time.time()
-        sample_questions = self._normalize_topic_lines([card.get("question", "") for card in cards], limit=5)
+        normalized = normalize_cards(cards)
+        sample_questions = self._normalize_topic_lines([card.get("question", "") for card in normalized], limit=5)
         self._conn.execute(
             """
             INSERT INTO flashcard_decks (source_hash, doc_id, title, card_count, sample_questions, payload, created_at)
@@ -279,18 +388,18 @@ class StudyProgressManager:
                 source_hash,
                 doc_id,
                 title,
-                len(cards),
+                len(normalized),
                 self._encode_list(sample_questions),
-                self._encrypt_json(cards),
+                self._encrypt_json(normalized),
                 now,
             ),
         )
-        for card in cards:
+        for card in normalized:
             question = str(card.get("question", "")).strip()
             answer = str(card.get("answer", "")).strip()
             if not question or not answer:
                 continue
-            card_key = self._card_key(question, answer)
+            card_key = str(card.get("card_key", "")).strip() or self._card_key(question, answer)
             self._conn.execute(
                 """
                 INSERT INTO card_states (
@@ -316,8 +425,35 @@ class StudyProgressManager:
                     now,
                 ),
             )
+            # Upsert enriched metadata
+            self.upsert_card_metadata(
+                source_hash=source_hash,
+                card_key=card_key,
+                doc_id=doc_id,
+                title=title,
+                card_type=str(card.get("card_type", "basic")),
+                cloze_text=card.get("cloze_text"),
+                source_refs=card.get("source_refs"),
+                tags=card.get("tags"),
+                focus=str(card.get("focus", "new_material")),
+                difficulty=card.get("difficulty"),
+                payload_hash=card.get("payload_hash"),
+            )
         self._conn.commit()
-        return {"status": "saved", "type": "flashcards", "count": len(cards)}
+        # Log event
+        self.record_event(
+            profile_id="default",
+            event_type="flashcards_generated",
+            source_hash=source_hash,
+            doc_id=doc_id,
+            payload={
+                "count": len(normalized),
+                "focus_types": list({str(c.get("focus", "new_material")) for c in normalized}),
+                "card_types": list({str(c.get("card_type", "basic")) for c in normalized}),
+                "tags_summary": list({tag for c in normalized for tag in (c.get("tags") or [])})[:10],
+            },
+        )
+        return {"status": "saved", "type": "flashcards", "count": len(normalized)}
 
     def record_quiz_attempt(
         self,
@@ -377,6 +513,20 @@ class StudyProgressManager:
             ),
         )
         self._conn.commit()
+        # Log event
+        self.record_event(
+            profile_id="default",
+            event_type="quiz_completed",
+            source_hash=source_hash,
+            doc_id=doc_id,
+            payload={
+                "score": score,
+                "total": total,
+                "weak_topics": weak_topics,
+                "strong_topics": strong_topics,
+                "ratio": ratio,
+            },
+        )
         return {
             "status": "saved",
             "type": "quiz_attempt",
@@ -515,6 +665,14 @@ class StudyProgressManager:
             ),
         )
         self._conn.commit()
+        # Log event
+        self.record_event(
+            profile_id="default",
+            event_type="flashcard_reviewed",
+            source_hash=source_hash,
+            doc_id=resolved_doc_id,
+            payload={"grade": grade_key, "interval_days": round(new_interval, 4), "card_key": card_key},
+        )
         return {
             "status": "saved",
             "type": "flashcard_review",
@@ -538,6 +696,7 @@ class StudyProgressManager:
         grasp_level: float | None = None,
         author: str = "agent",
         metadata: dict[str, Any] | None = None,
+        kind: str | None = None,
     ) -> dict:
         now = time.time()
         clean_weak = self._normalize_topic_lines(weak_topics)
@@ -545,6 +704,9 @@ class StudyProgressManager:
         note_text = str(note or "").strip()
         if not note_text:
             return {"error": "Progress note cannot be empty"}
+        meta = dict(metadata or {})
+        if kind is not None:
+            meta["kind"] = kind
         self._conn.execute(
             """
             INSERT INTO progress_notes (source_hash, doc_id, title, note, author, grasp_level, weak_topics, strong_topics, metadata, created_at)
@@ -559,7 +721,7 @@ class StudyProgressManager:
                 grasp_level,
                 self._encode_list(clean_weak),
                 self._encode_list(clean_strong),
-                self._encrypt_json(metadata or {}),
+                self._encrypt_json(meta),
                 now,
             ),
         )
@@ -730,8 +892,25 @@ class StudyProgressManager:
         ).fetchone()
         weak_topics = self._decode_list(profile_row["weak_topics"]) if profile_row else []
         now = time.time()
-        cards = [
-            {
+
+        # Fetch metadata map
+        meta_rows = self._conn.execute(
+            "SELECT card_key, card_type, tags, focus, source_refs, difficulty FROM card_metadata WHERE source_hash = ?",
+            (resolved_hash,),
+        ).fetchall()
+        meta_map: dict[str, dict] = {}
+        for m in meta_rows:
+            meta_map[str(m["card_key"])] = {
+                "card_type": m["card_type"],
+                "tags": self._decode_list(m["tags"]),
+                "focus": m["focus"],
+                "source_refs": self._decode_source_refs(m["source_refs"]),
+                "difficulty": m["difficulty"],
+            }
+
+        cards = []
+        for row in card_rows:
+            card: dict[str, Any] = {
                 "card_key": str(row["card_key"]),
                 "question": str(row["question"]),
                 "answer": str(row["answer"]),
@@ -740,8 +919,11 @@ class StudyProgressManager:
                 "last_grade": str(row["last_grade"] or ""),
                 "interval_days": float(row["interval_days"] or 0.0),
             }
-            for row in card_rows
-        ]
+            meta = meta_map.get(str(row["card_key"]))
+            if meta:
+                card.update(meta)
+            cards.append(card)
+
         deck_title = str(card_rows[0]["title"]) if card_rows else "Review Deck"
 
         def _priority(item: dict[str, Any]) -> tuple[int, int, float, int]:
@@ -760,6 +942,285 @@ class StudyProgressManager:
             "due_count": due_count,
             "new_count": new_count,
             "weak_topics": weak_topics,
+        }
+
+    # ── New retention methods ──────────────────────────────────────
+
+    def upsert_card_metadata(
+        self,
+        *,
+        source_hash: str,
+        card_key: str,
+        doc_id: str | None,
+        title: str,
+        card_type: str,
+        cloze_text: str | None,
+        source_refs: list[dict] | None,
+        tags: list[str] | None,
+        focus: str,
+        difficulty: str | None,
+        payload_hash: str | None,
+    ) -> None:
+        now = time.time()
+        self._conn.execute(
+            """
+            INSERT INTO card_metadata (source_hash, card_key, doc_id, title, card_type, cloze_text, source_refs, tags, focus, difficulty, payload_hash, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_hash, card_key) DO UPDATE SET
+                doc_id=excluded.doc_id,
+                title=excluded.title,
+                card_type=excluded.card_type,
+                cloze_text=excluded.cloze_text,
+                source_refs=excluded.source_refs,
+                tags=excluded.tags,
+                focus=excluded.focus,
+                difficulty=excluded.difficulty,
+                payload_hash=excluded.payload_hash,
+                updated_at=excluded.updated_at
+            """,
+            (
+                source_hash,
+                card_key,
+                doc_id,
+                title,
+                card_type,
+                cloze_text,
+                self._encode_source_refs(source_refs),
+                self._encode_list(tags),
+                focus,
+                difficulty,
+                payload_hash,
+                now,
+            ),
+        )
+
+    def get_card_metadata(self, *, source_hash: str, card_key: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM card_metadata WHERE source_hash = ? AND card_key = ?",
+            (source_hash, card_key),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "source_hash": str(row["source_hash"]),
+            "card_key": str(row["card_key"]),
+            "doc_id": row["doc_id"],
+            "title": str(row["title"]),
+            "card_type": str(row["card_type"]),
+            "cloze_text": row["cloze_text"],
+            "source_refs": self._decode_source_refs(row["source_refs"]),
+            "tags": self._decode_list(row["tags"]),
+            "focus": str(row["focus"]),
+            "difficulty": row["difficulty"],
+            "payload_hash": row["payload_hash"],
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def list_card_metadata(self, *, source_hash: str, limit: int = 100) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM card_metadata WHERE source_hash = ? ORDER BY updated_at DESC LIMIT ?",
+            (source_hash, max(1, min(int(limit), 500))),
+        ).fetchall()
+        return [
+            {
+                "source_hash": str(r["source_hash"]),
+                "card_key": str(r["card_key"]),
+                "doc_id": r["doc_id"],
+                "title": str(r["title"]),
+                "card_type": str(r["card_type"]),
+                "cloze_text": r["cloze_text"],
+                "source_refs": self._decode_source_refs(r["source_refs"]),
+                "tags": self._decode_list(r["tags"]),
+                "focus": str(r["focus"]),
+                "difficulty": r["difficulty"],
+                "payload_hash": r["payload_hash"],
+                "updated_at": float(r["updated_at"]),
+            }
+            for r in rows
+        ]
+
+    def upsert_anki_sync_state(
+        self,
+        *,
+        source_hash: str,
+        card_key: str,
+        anki_note_id: str | None,
+        deck_name: str | None,
+        note_type: str | None,
+        payload_hash: str | None,
+        last_synced_at: float | None = None,
+    ) -> None:
+        now = last_synced_at if last_synced_at is not None else time.time()
+        self._conn.execute(
+            """
+            INSERT INTO anki_sync_state (source_hash, card_key, anki_note_id, deck_name, note_type, payload_hash, last_synced_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_hash, card_key) DO UPDATE SET
+                anki_note_id=excluded.anki_note_id,
+                deck_name=excluded.deck_name,
+                note_type=excluded.note_type,
+                payload_hash=excluded.payload_hash,
+                last_synced_at=excluded.last_synced_at
+            """,
+            (source_hash, card_key, anki_note_id, deck_name, note_type, payload_hash, now),
+        )
+        self._conn.commit()
+
+    def get_anki_sync_state(self, *, source_hash: str, card_key: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM anki_sync_state WHERE source_hash = ? AND card_key = ?",
+            (source_hash, card_key),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "source_hash": str(row["source_hash"]),
+            "card_key": str(row["card_key"]),
+            "anki_note_id": row["anki_note_id"],
+            "deck_name": row["deck_name"],
+            "note_type": row["note_type"],
+            "payload_hash": row["payload_hash"],
+            "last_synced_at": float(row["last_synced_at"]) if row["last_synced_at"] else None,
+        }
+
+    def save_preferences(self, profile_id: str, prefs: dict) -> dict:
+        now = time.time()
+        existing = self.get_preferences(profile_id) or {}
+
+        def _merged_value(key: str, default: Any = None) -> Any:
+            if key in prefs:
+                return prefs.get(key)
+            return existing.get(key, default)
+
+        integrations = _merged_value("integrations_json", [])
+        adaptive_enabled = _merged_value("adaptive_enabled", True)
+        self._conn.execute(
+            """
+            INSERT INTO study_preferences (profile_id, goal, preferred_mode, tutoring_style, session_length_minutes, question_style, integrations_json, adaptive_enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile_id) DO UPDATE SET
+                goal=excluded.goal,
+                preferred_mode=excluded.preferred_mode,
+                tutoring_style=excluded.tutoring_style,
+                session_length_minutes=excluded.session_length_minutes,
+                question_style=excluded.question_style,
+                integrations_json=excluded.integrations_json,
+                adaptive_enabled=excluded.adaptive_enabled,
+                updated_at=excluded.updated_at
+            """,
+            (
+                profile_id,
+                _merged_value("goal"),
+                _merged_value("preferred_mode"),
+                _merged_value("tutoring_style"),
+                _merged_value("session_length_minutes"),
+                _merged_value("question_style"),
+                self._encode_list(integrations),
+                1 if adaptive_enabled else 0,
+                now,
+                now,
+            ),
+        )
+        self._conn.commit()
+        return {"status": "saved", "profile_id": profile_id}
+
+    def get_preferences(self, profile_id: str = "default") -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM study_preferences WHERE profile_id = ?",
+            (profile_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "profile_id": str(row["profile_id"]),
+            "goal": row["goal"],
+            "preferred_mode": row["preferred_mode"],
+            "tutoring_style": row["tutoring_style"],
+            "session_length_minutes": row["session_length_minutes"],
+            "question_style": row["question_style"],
+            "integrations_json": self._decode_list(row["integrations_json"]),
+            "adaptive_enabled": bool(row["adaptive_enabled"]),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def record_event(
+        self,
+        *,
+        profile_id: str = "default",
+        event_type: str,
+        payload: dict | None = None,
+        source_hash: str | None = None,
+        doc_id: str | None = None,
+    ) -> None:
+        now = time.time()
+        self._conn.execute(
+            "INSERT INTO study_events (profile_id, source_hash, doc_id, event_type, event_payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (profile_id, source_hash, doc_id, event_type, json.dumps(payload or {}, ensure_ascii=False), now),
+        )
+        self._conn.commit()
+
+    def list_events(
+        self,
+        *,
+        profile_id: str = "default",
+        limit: int = 200,
+        since: float | None = None,
+    ) -> list[dict]:
+        sql = "SELECT * FROM study_events WHERE profile_id = ?"
+        params: list[Any] = [profile_id]
+        if since is not None:
+            sql += " AND created_at >= ?"
+            params.append(since)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 1000)))
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "profile_id": str(r["profile_id"]),
+                "source_hash": r["source_hash"],
+                "doc_id": r["doc_id"],
+                "event_type": str(r["event_type"]),
+                "payload": json.loads(r["event_payload_json"] or "{}"),
+                "created_at": float(r["created_at"]),
+            }
+            for r in rows
+        ]
+
+    def reset_profile_data(self, profile_id: str = "default") -> None:
+        self._conn.execute("DELETE FROM study_events WHERE profile_id = ?", (profile_id,))
+        self._conn.execute("DELETE FROM study_preferences WHERE profile_id = ?", (profile_id,))
+        self._conn.commit()
+
+    def get_retention_snapshot(
+        self,
+        *,
+        source_hash: str | None = None,
+        doc_id: str | None = None,
+        profile_id: str = "default",
+    ) -> dict:
+        base = self.get_progress(source_hash=source_hash, doc_id=doc_id)
+        if "error" in base:
+            base = {"source_hash": source_hash, "doc_id": doc_id}
+        review = self.get_review_queue(source_hash=source_hash, doc_id=doc_id, limit=1000)
+        prefs = self.get_preferences(profile_id=profile_id) or {}
+        events = self.list_events(profile_id=profile_id, limit=200)
+
+        # Infer export/sync counts from events
+        anki_exports = sum(1 for e in events if e["event_type"] in ("exported_anki", "anki_sync_completed"))
+        meaningful_sessions = sum(1 for e in events if e["event_type"] in ("quiz_completed", "review_session_finished", "flashcards_generated"))
+
+        return {
+            **base,
+            "due_count": review.get("due_count", 0) if "error" not in review else 0,
+            "new_count": review.get("new_count", 0) if "error" not in review else 0,
+            "review_card_count": review.get("card_count", 0) if "error" not in review else 0,
+            "weak_topics": review.get("weak_topics", []) if "error" not in review else [],
+            "preferences": prefs,
+            "recent_event_count": len(events),
+            "anki_export_count": anki_exports,
+            "meaningful_sessions": meaningful_sessions,
         }
 
     def close(self) -> None:

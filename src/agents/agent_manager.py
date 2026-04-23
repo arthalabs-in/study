@@ -25,6 +25,10 @@ from src.manim_renderer import (
     get_animation_dependency_error,
     render_animation,
 )
+from src.motion_canvas_renderer import (
+    get_motion_canvas_dependency_error,
+    render_motion_canvas_animation,
+)
 from src.notes import NotesManager
 from src.parsers.doc_store import DocStore
 from src.parsers.image_parser import SUPPORTED_EXTENSIONS as IMG_EXTENSIONS
@@ -32,6 +36,9 @@ from src.pomodoro import PomodoroTimer
 from src.study_progress import StudyProgressManager
 from src.web_search import web_search
 from src import calibre_client, zotero_client
+from src.personalization_engine import compute_profile, steering_summary
+from src.retention_engine import recommend_flashcard_generation, recommend_quiz_generation
+from src.card_formats import normalize_cards
 
 
 @dataclass
@@ -63,7 +70,7 @@ class AgentManager:
 
     # Supported file extensions for autoloader
     _LOADABLE = {".pdf"} | set(IMG_EXTENSIONS)
-    _APPROVAL_REQUIRED_TOOLS = {"save_note", "export_content", "animate_concept"}
+    _APPROVAL_REQUIRED_TOOLS = {"save_note", "export_content", "animate_concept", "anki_sync_recent"}
     _ZOTERO_ITEM_KEY_RE = re.compile(r"^[A-Z0-9]{8}$")
 
     async def execute_tool(self, name: str, args: dict) -> Any:
@@ -199,6 +206,21 @@ class AgentManager:
         elif name == "get_review_queue":
             return self._get_review_queue(args.get("doc_id"), args.get("count", 20))
 
+        elif name == "get_study_preferences":
+            return self._get_study_preferences()
+
+        elif name == "save_study_preferences":
+            return self._save_study_preferences(args)
+
+        elif name == "get_retention_snapshot":
+            return self._get_retention_snapshot(args.get("doc_id"))
+
+        elif name == "anki_sync_recent":
+            approved = await self._ensure_tool_approval(name, args)
+            if not approved:
+                return {"status": "denied", "error": "User denied approval for anki_sync_recent."}
+            return await self._sync_recent_to_anki(args)
+
         elif name == "animate_concept":
             approved = await self._ensure_tool_approval(name, args)
             if not approved:
@@ -307,12 +329,44 @@ class AgentManager:
                 "success": False,
             }
 
+    def _profile_steering_summary(self, doc_id: str | None = None) -> str:
+        if not self.progress_manager:
+            return ""
+        try:
+            source_hash = self._resolve_source_hash(doc_id)
+            prefs = self.progress_manager.get_preferences("default") or {}
+            events = self.progress_manager.list_events(profile_id="default", limit=200)
+            snapshot = self.progress_manager.get_retention_snapshot(source_hash=source_hash, doc_id=doc_id, profile_id="default")
+            profile = compute_profile(preferences=prefs, events=events, progress_snapshot=snapshot)
+            return steering_summary(profile)
+        except Exception:
+            return ""
+
     async def _study_tool(self, name: str, args: dict) -> dict:
         """Handle study tools by prompting the LLM with specialized instructions."""
-        prompts = {
-            "generate_flashcards": (
-                f"Generate {args.get('count', 5)} study flashcards about '{args.get('topic', 'the document')}'. "
-                "First, use search_chunks to find relevant content, then create flashcards.\n"
+        doc_id = args.get("doc_id")
+        steering = self._profile_steering_summary(doc_id)
+        if steering:
+            steering = f"\n\n{steering}\n"
+
+        mode = str(args.get("mode", "basic") or "basic").strip().lower()
+        focus_topics = args.get("focus_topics")
+        focus_mode = str(args.get("focus_mode", "new_material") or "new_material").strip().lower()
+        include_source_refs = bool(args.get("include_source_refs", False))
+
+        flashcard_prompt = (
+            f"Generate {args.get('count', 5)} study flashcards about '{args.get('topic', 'the document')}'. "
+            f"First, use search_chunks to find relevant content, then create flashcards.{steering}\n"
+        )
+        if focus_topics:
+            flashcard_prompt += f"Emphasize these subtopics: {', '.join(str(t) for t in focus_topics)}.\n"
+        if focus_mode != "new_material":
+            flashcard_prompt += f"Focus mode: {focus_mode}. Tailor cards accordingly.\n"
+        if include_source_refs:
+            flashcard_prompt += "Include source references (doc_id/page/chunk_id) for each card when possible.\n"
+
+        if mode == "basic":
+            flashcard_prompt += (
                 "Return the deck in this exact format so the host app can enter flashcard mode:\n"
                 "[FLASHCARDS]\n"
                 "Q: [question]\n"
@@ -322,11 +376,27 @@ class AgentManager:
                 "[/FLASHCARDS]\n"
                 "You may include at most one short intro line before [FLASHCARDS] and one short follow-up line after [/FLASHCARDS].\n"
                 "Inside the [FLASHCARDS] block, use only repeated Q:/A: pairs. No bullets, no numbering, no markdown emphasis, and no extra commentary."
-            ),
+            )
+        else:
+            flashcard_prompt += (
+                "Return the deck as a JSON array of card objects. Each object must have:\n"
+                '- "question": string\n'
+                '- "answer": string\n'
+                '- "card_type": "basic" or "cloze"\n'
+                '- "cloze_text": string (only for cloze cards, with {{c1::...}} style clozes)\n'
+                '- "source_refs": array of {doc_id, page, chunk_id} (optional)\n'
+                '- "tags": array of strings (optional)\n'
+                '- "focus": "new_material" | "weak_area" | "exam_cram" | "review" (optional)\n'
+                '- "difficulty": "easy" | "medium" | "hard" (optional)\n'
+                "No markdown, no prose outside the JSON."
+            )
+
+        prompts = {
+            "generate_flashcards": flashcard_prompt,
             "generate_quiz": (
                 f"Generate {args.get('count', 5)} {args.get('difficulty', 'medium')}-difficulty quiz questions "
                 f"about '{args.get('topic', 'the document')}'. "
-                "First, use search_chunks to find relevant content.\n"
+                f"First, use search_chunks to find relevant content.{steering}\n"
                 "You MUST output ONLY a valid JSON array. No other text, no markdown, no explanation outside the JSON.\n"
                 "Each element is a question object with these fields:\n"
                 '- "type": either "mcq", "short", or "numeric"\n'
@@ -534,6 +604,79 @@ class AgentManager:
             limit=self._clamp_int(count, default=20, minimum=1, maximum=50),
         )
 
+    def _get_study_preferences(self) -> dict:
+        if not self.progress_manager:
+            return {"error": "Study progress persistence is not available."}
+        prefs = self.progress_manager.get_preferences("default")
+        if not prefs:
+            return {"info": "No study preferences saved yet."}
+        return prefs
+
+    def _save_study_preferences(self, args: dict) -> dict:
+        if not self.progress_manager:
+            return {"error": "Study progress persistence is not available."}
+        payload = {k: v for k, v in args.items() if v is not None}
+        self.progress_manager.save_preferences("default", payload)
+        return {"status": "saved", "preferences": payload}
+
+    def _get_retention_snapshot(self, doc_id: str | None) -> dict:
+        if not self.progress_manager:
+            return {"error": "Study progress persistence is not available."}
+        source_hash = self._resolve_source_hash(doc_id)
+        return self.progress_manager.get_retention_snapshot(source_hash=source_hash, doc_id=doc_id, profile_id="default")
+
+    async def _sync_recent_to_anki(self, args: dict) -> dict:
+        try:
+            from src.anki_client import AnkiClient
+        except Exception as e:
+            return {"error": f"Anki client unavailable: {e}"}
+        if not self.progress_manager:
+            return {"error": "Study progress persistence is not available."}
+        client = AnkiClient()
+        if not client.is_available():
+            return {"error": "AnkiConnect is not available. Make sure Anki is running with the AnkiConnect add-on."}
+        deck_name = str(args.get("deck_name", "Study TUI")).strip()
+        note_type = str(args.get("note_type", "basic") or "basic").strip().lower()
+        tags = [str(t).strip() for t in (args.get("tags") or []) if str(t).strip()]
+        limit = self._clamp_int(args.get("limit", 50), default=50, minimum=1, maximum=200)
+        # Get recent flashcards from session ref if available
+        cards = list(self.flashcards_ref or [])
+        if not cards:
+            return {"error": "No recent flashcards available to sync. Generate flashcards first."}
+        normalized = normalize_cards(cards[:limit])
+        try:
+            result = client.create_deck(deck_name)
+            if "error" in result:
+                return result
+        except Exception as e:
+            return {"error": f"Failed to create Anki deck: {e}"}
+        sync_result = client.add_or_update_notes(
+            cards=normalized,
+            deck_name=deck_name,
+            note_type=note_type,
+            tags=tags,
+        )
+        # Persist sync state
+        source_hash = None
+        try:
+            source_hash = self._resolve_source_hash(None)
+        except Exception:
+            pass
+        if source_hash:
+            for card in normalized:
+                ckey = card.get("card_key")
+                phash = card.get("payload_hash")
+                if ckey:
+                    self.progress_manager.upsert_anki_sync_state(
+                        source_hash=source_hash,
+                        card_key=ckey,
+                        anki_note_id=None,
+                        deck_name=deck_name,
+                        note_type=note_type,
+                        payload_hash=phash,
+                    )
+        return sync_result
+
     def _link_saved_note(
         self,
         *,
@@ -563,6 +706,7 @@ class AgentManager:
     async def _handle_animate(self, args: dict[str, Any]) -> dict[str, Any]:
         topic = str(args.get("topic", "")).strip()
         code = str(args.get("code", "")).strip()
+        backend = str(args.get("backend", "manim") or "manim").strip().lower().replace("-", "_")
         quality = str(args.get("quality", "high") or "high").strip().lower()
         attempt = self._clamp_int(args.get("attempt", 1), default=1, minimum=1, maximum=3)
 
@@ -580,25 +724,44 @@ class AgentManager:
                 "attempt": attempt,
                 "error": "Animation code is required.",
             }
+        if backend not in {"manim", "motion_canvas"}:
+            backend = "manim"
         if quality not in {"low", "medium", "high"}:
             quality = "high"
 
-        dependency_error = get_animation_dependency_error()
+        if backend == "motion_canvas":
+            dependency_error = get_motion_canvas_dependency_error()
+        else:
+            dependency_error = get_animation_dependency_error()
         if dependency_error:
             return {
                 "status": "error",
                 "retryable": False,
                 "attempt": attempt,
                 "topic": topic,
+                "backend": backend,
                 "error": dependency_error,
             }
 
-        result = await render_animation(
-            code,
-            export_dir=self.default_export_dir,
+        if backend == "motion_canvas":
+            result = await render_motion_canvas_animation(
+                code,
+                export_dir=self.default_export_dir,
+                quality=quality,
+            )
+        else:
+            result = await render_animation(
+                code,
+                export_dir=self.default_export_dir,
+                quality=quality,
+            )
+        return self._format_animation_result(
+            topic=topic,
+            attempt=attempt,
             quality=quality,
+            backend=backend,
+            result=result,
         )
-        return self._format_animation_result(topic=topic, attempt=attempt, quality=quality, result=result)
 
     def _format_animation_result(
         self,
@@ -606,6 +769,7 @@ class AgentManager:
         topic: str,
         attempt: int,
         quality: str,
+        backend: str,
         result: RenderResult,
     ) -> dict[str, Any]:
         if result.success:
@@ -615,6 +779,7 @@ class AgentManager:
                 "attempt": attempt,
                 "retryable": False,
                 "quality": quality,
+                "backend": backend,
                 "scene_name": result.scene_name,
                 "duration_seconds": round(float(result.duration_seconds), 2),
                 "video_path": result.video_path,
@@ -624,18 +789,61 @@ class AgentManager:
         preview = (result.stderr or "").strip()
         if len(preview) > 600:
             preview = preview[:597] + "..."
+        retry_guidance = self._animation_retry_guidance(
+            backend=backend,
+            error=result.error or "",
+            stderr=result.stderr or "",
+        )
         return {
             "status": "error",
             "topic": topic,
             "attempt": attempt,
             "retryable": attempt < 3,
             "quality": quality,
+            "backend": backend,
             "scene_name": result.scene_name,
             "duration_seconds": round(float(result.duration_seconds), 2),
             "error": result.error or "Animation render failed.",
             "stderr_preview": preview or None,
             "code_path": result.code_path,
+            "retry_guidance": retry_guidance,
         }
+
+    def _animation_retry_guidance(self, *, backend: str, error: str, stderr: str) -> str | None:
+        combined = "\n".join(part for part in (error, stderr) if part).strip()
+        if not combined:
+            return None
+        if backend == "motion_canvas":
+            missing_export = re.search(r"does not provide an export named ['\"]([^'\"]+)['\"]", combined, flags=re.IGNORECASE)
+            if missing_export:
+                symbol = missing_export.group(1)
+                known_sources = {
+                    "Vector2": "@motion-canvas/core",
+                    "all": "@motion-canvas/core",
+                    "chain": "@motion-canvas/core",
+                    "createRef": "@motion-canvas/core",
+                    "createSignal": "@motion-canvas/core",
+                    "easeInOutCubic": "@motion-canvas/core",
+                    "waitFor": "@motion-canvas/core",
+                    "Circle": "@motion-canvas/2d",
+                    "Layout": "@motion-canvas/2d",
+                    "Line": "@motion-canvas/2d",
+                    "makeScene2D": "@motion-canvas/2d",
+                    "Node": "@motion-canvas/2d",
+                    "Rect": "@motion-canvas/2d",
+                    "Txt": "@motion-canvas/2d",
+                }
+                expected = known_sources.get(symbol)
+                if expected:
+                    return f"Fix the import source for {symbol}: import it from {expected}, then retry with the supported scaffold."
+                return f"Fix the import source for {symbol} before retrying the Motion Canvas scene."
+            if "failed to resolve import" in combined.lower():
+                return "Remove or replace the unresolved import, and stay close to the supported Motion Canvas scaffold before retrying."
+            if "booting" in combined.lower():
+                return "The scene likely failed during module load. Recheck imports and keep the scene close to the supported Motion Canvas scaffold before retrying."
+        if backend == "manim" and "latex" in combined.lower():
+            return "Use plain Text for ordinary prose, keep MathTex/Tex only for true formulas, and escape TeX-sensitive characters before retrying."
+        return None
 
     def _handle_export(self, args: dict) -> dict:
         """Route export_content tool calls to the appropriate exporter."""
@@ -652,7 +860,15 @@ class AgentManager:
             cards = args.get("cards") or self.flashcards_ref or []
             if not cards:
                 return {"error": "No flashcards available to export. Generate flashcards first or pass cards as an array of {question, answer}."}
-            return export_flashcards(cards, fmt=fmt, export_dir=export_dir)
+            return export_flashcards(
+                cards,
+                fmt=fmt,
+                export_dir=export_dir,
+                deck_name=args.get("deck_name"),
+                note_type=str(args.get("note_type", "basic") or "basic").strip().lower(),
+                tags=args.get("tags"),
+                include_source_refs=bool(args.get("include_source_refs", False)),
+            )
 
         elif export_type == "notes":
             return self.notes_manager.export_notes_markdown(path=export_dir)
@@ -764,6 +980,10 @@ class AgentManager:
             "get_study_progress": lambda a: "Loading stored study progress...",
             "save_progress_note": lambda a: "Updating long-term study progress...",
             "get_review_queue": lambda a: "Loading personalized review queue...",
+            "get_retention_snapshot": lambda a: "Loading retention snapshot...",
+            "get_study_preferences": lambda a: "Loading study preferences...",
+            "save_study_preferences": lambda a: "Saving study preferences...",
+            "anki_sync_recent": lambda a: f"Syncing recent cards to Anki deck '{a.get('deck_name', '')}'...",
             "pomodoro_start": lambda a: f"Starting {a.get('work_mins', 25)}-minute focus session...",
             "pomodoro_status": lambda a: "Checking timer status...",
             "pomodoro_stop": lambda a: "Stopping timer...",

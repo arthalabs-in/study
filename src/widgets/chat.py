@@ -6,17 +6,26 @@ Streaming, markdown rendering, interactive quiz mode.
 
 from __future__ import annotations
 
+import os
 import re
+from functools import lru_cache
+from pathlib import Path
 
 from src.latex_render import render_math_in_text
+from src.widgets.mascot_art import mascot_lines, MASCOT_WIDTH
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Input, Static, RichLog, OptionList
+from textual.widgets import Input, RichLog, OptionList
 from textual.widgets.option_list import Option
 from textual.widget import Widget
 from textual.timer import Timer
+from rich.align import Align
+from rich import box
+from rich.columns import Columns
+from rich.console import Group
+from rich.table import Table
 from rich.text import Text
 
 
@@ -33,6 +42,14 @@ TEXT = "#e6e1cf"          # Primary text
 TEXT_DIM = "#b3b1ad"      # Secondary text
 
 
+def _truncate_middle(value: str, limit: int = 44) -> str:
+    value = str(value or "").strip()
+    if len(value) <= limit:
+        return value
+    keep = max(8, (limit - 1) // 2)
+    return f"{value[:keep]}…{value[-keep:]}"
+
+
 # ── Slash commands for autocomplete ───────────────────────────────
 
 SLASH_COMMANDS = [
@@ -44,6 +61,11 @@ SLASH_COMMANDS = [
     ("/flashcards", "Generate flashcards"),
     ("/summary",    "Summarize loaded files"),
     ("/animate",    "Render a concept animation"),
+    ("/study-now",  "Get personalized study recommendation"),
+    ("/drill",      "Targeted weak-area drill"),
+    ("/study-setup","Personalize study flow"),
+    ("/study-prefs","Show study preferences"),
+    ("/reset-profile","Reset adaptive data"),
     ("/q",          "Quote paragraphs from last response"),
     ("/theme",      "Pick or switch UI theme"),
     ("/web",        "Pick web search state"),
@@ -384,6 +406,8 @@ class ChatView(Widget):
         self._flashcard_grade_counts: dict[str, int] = {"again": 0, "hard": 0, "good": 0, "easy": 0}
         self._option_mode: str = "command"
         self._picker_submit_map: dict[str, str] = {}
+        self._picker_options: list[tuple[str, str, str]] = []
+        self._welcome_mascot_happy: bool = False
 
     def compose(self) -> ComposeResult:
         yield RichLog(
@@ -422,71 +446,148 @@ class ChatView(Widget):
         "╚══════╝   ╚═╝    ╚═════╝ ╚═════╝    ╚═╝   ",
     ]
 
-    def write_welcome(self) -> None:
+    def _set_welcome_mascot(self, *, visible: bool, happy: bool = False, compact: bool = False) -> None:
+        self._welcome_mascot_happy = happy if visible else False
+
+    def _hide_welcome_mascot(self) -> None:
+        self._welcome_mascot_happy = False
+
+    def write_welcome(self, overview: dict | None = None) -> None:
         log = self.query_one("#chat-log", RichLog)
+        overview = overview or {}
+        try:
+            term_cols = os.get_terminal_size(fallback=(80, 24)).columns
+        except Exception:
+            term_cols = 80
+        viewport_width = max(
+            getattr(log.size, "width", 0),
+            getattr(self.size, "width", 0),
+            term_cols,
+            80,
+        )
+        available_width = max(72, viewport_width - 4)
+        compact_mode = available_width < 120
+        narrow_mode = available_width < 60
+        self._set_welcome_mascot(visible=False, compact=compact_mode)
+
+        banner_group = Group(*(Text(line, style=f"bold {AMBER}") for line in self.BANNER))
+        alpha_badge = Text()
+        alpha_badge.append("⟦", style=DIM)
+        alpha_badge.append(" alpha ", style=f"bold {LAVENDER} on #131a24")
+        alpha_badge.append("⟧", style=DIM)
+
         log.write(Text(" "))
+        log.write(Align.center(banner_group, width=available_width))
+        log.write(Align.center(alpha_badge, width=available_width))
 
-        # Chunky block banner
-        for line in self.BANNER:
-            log.write(Text(f"  {line}", style=f"bold {AMBER}"))
+        provider = str(overview.get("provider") or "not set")
+        model = str(overview.get("model") or self.model_label or "AI")
+        docs_dir = str(overview.get("documents_dir") or "Not configured")
+        loaded_docs = list(overview.get("loaded_documents") or [])
+        recent_sessions = list(overview.get("recent_sessions") or [])
 
-        subtitle = Text("  TUI · Multi-Model · Terminal Study Companion", style=DIM)
-        subtitle.append(" · alpha", style=f"italic {LAVENDER}")
-        log.write(subtitle)
-        log.write(Text(" "))
+        left = Table.grid(padding=(0, 0))
+        left.add_column()
 
-        # Commands
-        cmds = [
-            ("- /load        ", "Open file picker"),
-            ("- /quiz        ", "Start interactive quiz"),
-            ("- /review      ", "Review saved flashcards"),
-            ("- /flashcards  ", "Generate flashcards"),
-            ("- /summary     ", "Summarize loaded files"),
-            ("- /animate     ", "Render a concept animation"),
-            ("- /q [N] [N-M] ", "Quote paragraphs from last response"),
-            ("- /theme      ", "Pick or switch UI theme"),
-            ("- /web        ", "Pick web search state"),
-            ("- /privacy    ", "Pick remote document privacy mode"),
-            ("- /privacy-approve ", "Allow remote doc access this session"),
-            ("- /key <key>   ", "Set or update API key"),
-            ("- /provider    ", "Pick or switch AI provider"),
-            ("- /model       ", "Pick or switch model"),
-            ("- /export-privacy ", "Pick export privacy mode"),
-            ("- /continue    ", "Resume previous session"),
-            ("- /resume      ", "Pick a session to resume"),
-            ("- /new         ", "Start a new chat session"),
-            ("- /history     ", "Browse recent sessions"),
-            ("- /approve     ", "Approve pending write"),
-            ("- /deny        ", "Deny pending write"),
-            ("- /clear       ", "Clear current chat"),
-            ("- /copy        ", "Copy last response"),
-            ("- /usage       ", "Show token and context usage"),
-            ("- /context     ", "Inspect prompt-state context"),
-            ("- /compact     ", "Compact older prompt-state"),
-            ("- /docdir      ", "Set documents folder"),
-            ("- /calibre-dir ", "Set Calibre library path"),
-            ("- /zotero-webhook ", "Manage Zotero webhook"),
-            ("- /help        ", "Show this message"),
-            ("- <ctrl+c>     ", "Quit"),
+        def _kv(label: str, value: str, accent: str = TEXT) -> Text:
+            line = Text()
+            line.append(f"{label:<12}", style=DIM)
+            line.append(_truncate_middle(value), style=f"bold {accent}")
+            return line
+
+        left.add_row(Text("Workspace", style=f"bold {SAGE}"))
+        left.add_row(_kv("provider", provider, TEAL))
+        left.add_row(_kv("model", model, AMBER))
+        left.add_row(_kv("doc dir", docs_dir))
+        if loaded_docs:
+            left.add_row(_kv("loaded", ", ".join(_truncate_middle(doc, 18) for doc in loaded_docs[:2]), TEAL))
+        else:
+            left.add_row(_kv("loaded", "none", TEXT_DIM))
+        left.add_row(Text(" "))
+        left.add_row(Text("Recent Sessions", style=f"bold {LAVENDER}"))
+        if recent_sessions:
+            for session in recent_sessions[:4]:
+                title = _truncate_middle(str(session.get("title") or "Untitled"), 30)
+                count = int(session.get("messages") or 0)
+                line = Text("• ", style=TEAL)
+                line.append(title, style=TEXT)
+                line.append(f" · {count} msgs", style=DIM)
+                left.add_row(line)
+        else:
+            left.add_row(Text("No saved sessions yet", style=DIM))
+
+        right = Table.grid(padding=(0, 0))
+        right.add_column()
+        right.add_row(Text("Core Workflows", style=f"bold {SAGE}"))
+        features = [
+            ("/load", "Open PDFs or images and ground the chat in them."),
+            ("/quiz", "Run interactive quiz mode with grading and weak-point tracking."),
+            ("/flashcards", "Generate cards, then keep reviewing them persistently."),
+            ("/review", "Resume saved review queues tied to the document hash."),
+            ("/summary", "Condense chapters, notes, and extracted context fast."),
+            ("/animate", "Render concept animations with Manim when installed."),
+            ("notes/export", "Save notes, export PDF/Anki, and send PDFs to Calibre or Zotero."),
+            ("progress", "Track grasp, weak topics, and personalized study memory."),
         ]
-        for cmd, desc in cmds:
-            t = Text()
-            t.append("    ")
-            t.append(f"{cmd:<16}", style=f"{TEAL}")
-            t.append(desc, style=DIM)
-            log.write(t)
+        for name, desc in features:
+            row = Text()
+            row.append(f"{name:<14}", style=f"bold {SAGE}")
+            row.append(desc, style=DIM)
+            right.add_row(row)
+
+        if compact_mode:
+            shell_width = min(available_width, 96)
+            shell = Table(
+                box=box.ROUNDED,
+                show_header=False,
+                expand=False,
+                width=shell_width,
+                padding=(0, 2),
+                border_style=DIM,
+            )
+            shell.add_column(ratio=1, overflow="fold")
+            shell.add_row(left)
+            shell.add_section()
+            shell.add_row(right)
+        else:
+            shell_width = min(available_width, max(118, int(available_width * 0.82)))
+            shell = Table(
+                box=box.ROUNDED,
+                show_header=False,
+                expand=False,
+                width=shell_width,
+                padding=(1, 2),
+                border_style=DIM,
+            )
+            shell.add_column(ratio=10, overflow="fold")
+            shell.add_column(ratio=14, overflow="fold")
+            shell.add_row(left, right)
+
+        shell.title = f"[bold {AMBER}]Study Workspace[/]"
+        shell.caption = f"[{DIM}]/help for full commands[/]"
+        log.write(Text(" "))
+        log.write(Align.center(shell, width=available_width))
 
         log.write(Text(" "))
+        quick = Text()
+        quick.append("resume ", style=DIM)
+        quick.append("/resume", style=f"bold {TEAL}")
+        quick.append(" · change doc folder ", style=DIM)
+        quick.append("/docdir", style=f"bold {TEAL}")
+        quick.append(" · full command list ", style=DIM)
+        quick.append("/help", style=f"bold {TEAL}")
+        log.write(Align.center(quick, width=available_width))
         tip = Text()
-        tip.append("    💡 ", style="bold")
+        tip.append("tip ", style=DIM)
         tip.append("Shift + mouse drag", style=f"bold {TEAL}")
-        tip.append(" to select & copy text from responses", style=DIM)
-        log.write(tip)
+        tip.append(" to select text from the transcript", style=DIM)
+        log.write(Align.center(tip, width=available_width))
         log.write(Text(" "))
 
     # ── Message rendering ──────────────────────────────────────────
 
     def add_user_message(self, text: str) -> None:
+        self._hide_welcome_mascot()
         log = self.query_one("#chat-log", RichLog)
         log.write(Text(" "))
         t = Text()
@@ -495,6 +596,7 @@ class ChatView(Widget):
         log.write(t)
 
     def add_assistant_message(self, text: str) -> None:
+        self._hide_welcome_mascot()
         parsed_flashcards = _parse_flashcards(text)
         if parsed_flashcards:
             self._add_flashcards_message(text, parsed_flashcards)
@@ -516,6 +618,7 @@ class ChatView(Widget):
         raw_text: str,
         parsed: tuple[list[str], list[tuple[str, str]], list[str]],
     ) -> None:
+        self._hide_welcome_mascot()
         intro_lines, cards, outro_lines = parsed
         log = self.query_one("#chat-log", RichLog)
         log.write(Text(" "))
@@ -564,6 +667,7 @@ class ChatView(Widget):
         outro_lines: list[str] | None = None,
         review_mode: bool = False,
     ) -> None:
+        self._hide_welcome_mascot()
         self._flashcards_active = True
         self._flashcards = list(cards)
         self._flashcard_index = 0
@@ -833,6 +937,7 @@ class ChatView(Widget):
     # ── Streaming ──────────────────────────────────────────────────
 
     def start_response(self) -> None:
+        self._hide_welcome_mascot()
         self.hide_typing()
         log = self.query_one("#chat-log", RichLog)
         self._write_line(log, Text(" "))
@@ -1177,27 +1282,35 @@ class ChatView(Widget):
 
     def show_nested_picker(self, prompt: str, options: list[tuple[str, str, str]]) -> None:
         """Show a contextual picker whose selection submits a command."""
-        ol = self.query_one("#cmd-suggest", OptionList)
-        ol.clear_options()
         self._option_mode = "picker"
-        self._picker_submit_map = {}
-
-        for option_id, label, submit_text in options:
-            self._picker_submit_map[option_id] = submit_text
-            ol.add_option(Option(label, id=option_id))
-
-        if ol.option_count == 0:
-            self._hide_suggestions()
-            return
-
-        ol.display = True
-        ol.styles.height = min(ol.option_count + 1, 8)
-        ol.highlighted = 0
+        self._picker_options = list(options)
 
         inp = self.query_one("#chat-input", Input)
         inp.value = ""
         inp.placeholder = prompt
         inp.focus()
+        self._show_picker_matches("")
+
+    def _show_picker_matches(self, query: str) -> None:
+        ol = self.query_one("#cmd-suggest", OptionList)
+        normalized = query.strip().lower()
+        ol.clear_options()
+        self._picker_submit_map = {}
+
+        for option_id, label, submit_text in self._picker_options:
+            haystacks = (label.lower(), submit_text.lower(), option_id.lower())
+            if normalized and not any(normalized in hay for hay in haystacks):
+                continue
+            self._picker_submit_map[option_id] = submit_text
+            ol.add_option(Option(label, id=option_id))
+
+        if ol.option_count == 0:
+            ol.display = False
+            return
+
+        ol.display = True
+        ol.styles.height = min(max(ol.option_count + 2, 3), 8)
+        ol.highlighted = 0
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat-input":
@@ -1230,18 +1343,13 @@ class ChatView(Widget):
             return
         text = event.value
         if self._option_mode == "picker":
-            if text:
+            if text.startswith("/") and not self._quiz_active and not self._flashcards_active:
                 self._hide_suggestions()
-                if text.startswith("/") and not self._quiz_active and not self._flashcards_active:
-                    self._show_suggestions(text)
+                self._show_suggestions(text)
+                return
+            self._show_picker_matches(text)
             return
         if text.startswith("/") and not self._quiz_active and not self._flashcards_active:
-            exact_command = text.strip()
-            if exact_command in PICKER_COMMANDS:
-                self._hide_suggestions()
-                event.input.value = ""
-                self.post_message(self.UserMessage(exact_command))
-                return
             self._show_suggestions(text)
         else:
             self._hide_suggestions()
@@ -1267,7 +1375,7 @@ class ChatView(Widget):
             ol.add_option(Option(f"{cmd:14s} {desc}", id=cmd))
 
         ol.display = True
-        ol.styles.height = min(len(matches) + 1, 8)
+        ol.styles.height = min(max(len(matches) + 2, 3), 8)
         if ol.option_count > 0:
             ol.highlighted = 0
 
@@ -1276,6 +1384,7 @@ class ChatView(Widget):
         was_picker = self._option_mode == "picker"
         self._option_mode = "command"
         self._picker_submit_map = {}
+        self._picker_options = []
         try:
             ol = self.query_one("#cmd-suggest", OptionList)
             ol.display = False
@@ -1374,7 +1483,7 @@ class ChatView(Widget):
         if not ol.display:
             return
 
-        if event.key == "tab":
+        if event.key in {"tab", "enter"}:
             event.prevent_default()
             event.stop()
             if self._option_mode == "picker":
@@ -1409,6 +1518,7 @@ class ChatView(Widget):
     def clear_log(self) -> None:
         log = self.query_one("#chat-log", RichLog)
         log.clear()
+        self._hide_welcome_mascot()
 
     def focus_input(self) -> None:
         try:
