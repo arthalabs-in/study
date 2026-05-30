@@ -4904,7 +4904,18 @@ def main():
     settings = SettingsManager()
     file_path = args.file_flag or args.file
 
-    auto_setup = not args.setup and _should_auto_run_setup(settings) and sys.stdin.isatty()
+    skip_auto_setup = str(os.environ.get("STUDY_SKIP_AUTO_SETUP", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    auto_setup = (
+        not skip_auto_setup
+        and not args.setup
+        and _should_auto_run_setup(settings)
+        and sys.stdin.isatty()
+    )
     if auto_setup:
         CLI_CONSOLE.print("[bold yellow]First launch detected.[/bold yellow] Opening setup before Study TUI starts.\n")
 
