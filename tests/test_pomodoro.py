@@ -97,6 +97,24 @@ def test_status_expiry_enters_long_break(monkeypatch) -> None:
     assert emitted[1] == '🎉 2 pomodoros done! Take a 9 min long break.'
 
 
+def test_work_completion_event_emits_once_during_repeated_status_checks(monkeypatch) -> None:
+    clock = FakeClock(now=5_000.0)
+    emitted: list[str] = []
+    monkeypatch.setattr('src.pomodoro.time.time', clock.time)
+    timer = PomodoroTimer(work_mins=1, short_break_mins=5, on_status=emitted.append)
+
+    timer.start()
+    emitted.clear()
+    clock.now += 61
+
+    first = timer.status()
+    second = timer.status()
+
+    assert first['status'] == 'short_break'
+    assert second['status'] == 'short_break'
+    assert emitted.count('✅ Pomodoro #1 complete! Time for a break.') == 1
+
+
 def test_status_expiry_from_break_returns_idle(monkeypatch) -> None:
     clock = FakeClock(now=8_000.0)
     emitted: list[str] = []

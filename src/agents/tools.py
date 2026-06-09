@@ -719,13 +719,14 @@ POMODORO_TOOLS = [
         "name": "pomodoro_start",
         "description": (
             "Start a Pomodoro focus timer. Default is 25 minutes. "
-            "Use when the user wants to start a focus session."
+            "Use immediately when the user directly asks to start a timer. "
+            "If you are suggesting a timer yourself, ask the user before starting it."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "work_mins": {
-                    "type": "integer",
+                    "type": ["integer", "null"],
                     "description": "Work duration in minutes (default: 25).",
                     "default": 25,
                 },

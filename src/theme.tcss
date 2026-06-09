@@ -37,6 +37,16 @@ ChatView {
     display: none;
 }
 
+#pomodoro-status {
+    dock: top;
+    height: 1;
+    width: 1fr;
+    min-width: 14;
+    padding: 0 1;
+    text-align: right;
+    display: none;
+}
+
 #chat-log {
     height: 1fr;
     width: 1fr;
@@ -96,6 +106,7 @@ App.theme-midnight Screen { background: #0a0e14; color: #b3b1ad; }
 App.theme-midnight Header { background: #0d1117; color: #4d5566; }
 
 App.theme-midnight #doc-status-bar { background: #0d1117; color: #ffb454; }
+App.theme-midnight #pomodoro-status { background: #0d1117; color: #ffb454; }
 
 App.theme-midnight 
 App.theme-midnight HeaderTitle { color: #ffb454; text-style: bold; }
@@ -135,6 +146,7 @@ App.theme-cyber Screen { background: #000000; color: #a4b5c4; }
 App.theme-cyber Header { background: #000000; color: #00ff41; border-bottom: heavy #00ff41; }
 
 App.theme-cyber #doc-status-bar { background: #000000; color: #00ff41; }
+App.theme-cyber #pomodoro-status { background: #000000; color: #00ff41; }
 
 App.theme-cyber 
 App.theme-cyber HeaderTitle { color: #00ff41; text-style: bold italic; }
@@ -175,6 +187,7 @@ App.theme-focus Screen { background: #1a1b26; color: #a9b1d6; }
 App.theme-focus Header { background: #16161e; color: #565f89; }
 
 App.theme-focus #doc-status-bar { background: #16161e; color: #7aa2f7; }
+App.theme-focus #pomodoro-status { background: #16161e; color: #7aa2f7; }
 
 App.theme-focus 
 App.theme-focus HeaderTitle { color: #7aa2f7; }
@@ -215,6 +228,7 @@ App.theme-retro Screen { background: #282828; color: #ebdbb2; }
 App.theme-retro Header { background: #1d2021; color: #a89984; border-bottom: dashed #a89984; }
 
 App.theme-retro #doc-status-bar { background: #1d2021; color: #d79921; }
+App.theme-retro #pomodoro-status { background: #1d2021; color: #d79921; }
 
 App.theme-retro 
 App.theme-retro HeaderTitle { color: #d79921; text-style: bold; }
@@ -255,6 +269,7 @@ App.theme-aurora Screen { background: #08131a; color: #d6ecf3; }
 App.theme-aurora Header { background: #0b1b24; color: #4f7480; border-bottom: heavy #69d2e7; }
 
 App.theme-aurora #doc-status-bar { background: #0b1b24; color: #69d2e7; }
+App.theme-aurora #pomodoro-status { background: #0b1b24; color: #69d2e7; }
 
 App.theme-aurora 
 App.theme-aurora HeaderTitle { color: #9ef0ff; text-style: bold; }
@@ -295,6 +310,7 @@ App.theme-paper Screen { background: #f5f1e8; color: #55493d; }
 App.theme-paper Header { background: #ebe3d6; color: #8e7f6f; border-bottom: solid #d8c7b2; }
 
 App.theme-paper #doc-status-bar { background: #ebe3d6; color: #b06b2d; }
+App.theme-paper #pomodoro-status { background: #ebe3d6; color: #b06b2d; }
 
 App.theme-paper 
 App.theme-paper HeaderTitle { color: #b06b2d; text-style: bold; }

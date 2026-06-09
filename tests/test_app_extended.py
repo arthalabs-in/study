@@ -76,6 +76,15 @@ class FakeTimer:
         self.stopped = True
 
 
+class FakePomodoroStatus:
+    def __init__(self) -> None:
+        self.update_calls: list[str] = []
+        self.display = False
+
+    def update(self, text: str) -> None:
+        self.update_calls.append(text)
+
+
 class FakeChat:
     def __init__(self) -> None:
         self.system_messages: list[str] = []
@@ -399,6 +408,7 @@ class FakeProgressManager:
 def make_app() -> tuple[StudyTUI, FakeChat, FakeHistory, list]:
     app = StudyTUI.__new__(StudyTUI)
     chat = FakeChat()
+    pomodoro_status = FakePomodoroStatus()
     history = FakeHistory()
     progress = FakeProgressManager()
     workers = []
@@ -446,6 +456,12 @@ def make_app() -> tuple[StudyTUI, FakeChat, FakeHistory, list]:
     app._doc_source_hashes = {}
     app._latest_source_hash = None
     app._pending_study_workflow = None
+    app._pomodoro_timer_visible = True
+    app._pomodoro_status_text = ''
+    app._pomodoro_last_status = 'idle'
+    app._pomodoro_completion_pending = False
+    app._pomodoro_completion_notified = False
+    app._last_user_message_at = 1_000.0
     app._resolve_api_key = lambda provider: ''
     app._init_provider = lambda: None
     app._documents_loaded = lambda: bool(app.doc_store.documents)
@@ -456,10 +472,17 @@ def make_app() -> tuple[StudyTUI, FakeChat, FakeHistory, list]:
         for tool in app_module.ALL_TOOLS
         if str(tool.get('name', '')).strip()
     }
-    app.query_one = lambda *args, **kwargs: chat
+    def _query_one(selector, *args, **kwargs):
+        if selector == '#pomodoro-status':
+            return pomodoro_status
+        return chat
+
+    app.query_one = _query_one
+    app._fake_pomodoro_status = pomodoro_status
     def _run_worker(work, **kwargs):
         name = getattr(getattr(work, 'cr_code', None), 'co_name', repr(work))
-        workers.append((SimpleNamespace(name=name), kwargs))
+        locals_snapshot = dict(getattr(getattr(work, 'cr_frame', None), 'f_locals', {}) or {})
+        workers.append((SimpleNamespace(name=name, locals=locals_snapshot), kwargs))
         if asyncio.iscoroutine(work):
             work.close()
         return SimpleNamespace(cancel=lambda: workers.append(('cancelled', kwargs)), is_finished=False)
@@ -1543,6 +1566,111 @@ def test_select_tools_keeps_core_study_tools_available() -> None:
     assert "search_notes" in names
     assert "pomodoro_start" in names
     assert "export_content" in names
+
+
+def test_pomodoro_start_schema_allows_null_duration() -> None:
+    pomodoro_start = next(tool for tool in app_module.ALL_TOOLS if tool.get('name') == 'pomodoro_start')
+    work_mins = pomodoro_start['input_schema']['properties']['work_mins']
+    assert work_mins['type'] == ['integer', 'null']
+
+
+def test_toggle_pomodoro_timer_hides_and_restores_active_status() -> None:
+    app, _chat, _history, _workers = make_app()
+    widget = app._fake_pomodoro_status
+    app._pomodoro_status_text = 'Focus 24:12'
+
+    StudyTUI._render_pomodoro_status(app)
+    assert widget.display is True
+    assert widget.update_calls[-1] == 'Focus 24:12'
+
+    StudyTUI.action_toggle_pomodoro_timer(app)
+    assert app._pomodoro_timer_visible is False
+    assert widget.display is False
+
+    StudyTUI.action_toggle_pomodoro_timer(app)
+    assert app._pomodoro_timer_visible is True
+    assert widget.display is True
+    assert widget.update_calls[-1] == 'Focus 24:12'
+
+
+def test_pomodoro_tick_updates_status_and_queues_completion_context() -> None:
+    app, chat, _history, _workers = make_app()
+    widget = app._fake_pomodoro_status
+    statuses = [
+        {'status': 'working', 'remaining': '00:01'},
+        {'status': 'short_break', 'remaining': '05:00', 'completed_pomodoros': 1},
+        {'status': 'short_break', 'remaining': '04:59', 'completed_pomodoros': 1},
+    ]
+
+    app._agent_manager.pomodoro = SimpleNamespace(status=lambda: statuses.pop(0))
+
+    StudyTUI._tick_pomodoro_ui(app)
+    assert widget.update_calls[-1] == 'Focus 00:01'
+    assert app._pomodoro_completion_pending is False
+
+    StudyTUI._tick_pomodoro_ui(app)
+    StudyTUI._tick_pomodoro_ui(app)
+
+    assert widget.update_calls[-1] == 'Break 04:59'
+    assert app._pomodoro_completion_pending is True
+    assert chat.system_messages.count('Pomodoro complete. Wrap up this study session.') == 1
+
+
+def test_pomodoro_tool_status_completion_queues_context() -> None:
+    app, chat, _history, _workers = make_app()
+    app._pomodoro_last_status = 'working'
+
+    StudyTUI._capture_tool_result(
+        app,
+        'pomodoro_status',
+        {'status': 'short_break', 'remaining': '05:00', 'completed_pomodoros': 1},
+    )
+
+    assert app._pomodoro_completion_pending is True
+    assert chat.system_messages.count('Pomodoro complete. Wrap up this study session.') == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_pomodoro_context_is_injected_on_next_user_message() -> None:
+    app, chat, _history, workers = make_app()
+    app._remote_docs_approved = True
+    app._pomodoro_completion_pending = True
+
+    await StudyTUI.on_chat_view_user_message(app, SimpleNamespace(text='What did we cover?'))
+
+    assert chat.user_messages == ['What did we cover?']
+    worker = workers[-1][0]
+    assert worker.name == '_run_generation'
+    pending = worker.locals['pending_messages']
+    assert any('Pomodoro completed before this user message' in item['content'] for item in pending)
+    assert app._pomodoro_completion_pending is False
+
+
+@pytest.mark.asyncio
+async def test_long_inactivity_context_is_injected_on_next_normal_user_message(monkeypatch) -> None:
+    app, _chat, _history, workers = make_app()
+    app._remote_docs_approved = True
+    app._last_user_message_at = 1_000.0
+    monkeypatch.setattr(app_module.time, 'time', lambda: 4_700.0)
+
+    await StudyTUI.on_chat_view_user_message(app, SimpleNamespace(text='I am back'))
+
+    pending = workers[-1][0].locals['pending_messages']
+    assert any('user was away for about 62 minutes' in item['content'] for item in pending)
+    assert app._last_user_message_at == 4_700.0
+
+
+@pytest.mark.asyncio
+async def test_slash_command_does_not_inject_long_inactivity_context(monkeypatch) -> None:
+    app, _chat, _history, workers = make_app()
+    app._remote_docs_approved = True
+    app._last_user_message_at = 1_000.0
+    monkeypatch.setattr(app_module.time, 'time', lambda: 4_700.0)
+
+    await StudyTUI.on_chat_view_user_message(app, SimpleNamespace(text='/help'))
+
+    assert workers == []
+    assert app._last_user_message_at == 1_000.0
 
 
 def test_select_tools_keeps_animation_for_confirmation_turns() -> None:

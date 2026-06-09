@@ -729,7 +729,10 @@ Pomodoro Timer:
 - pomodoro_start(work_mins) — start a focus timer (default 25 min)
 - pomodoro_status() — check remaining time and stats
 - pomodoro_stop() — stop the timer
-- Encourage the user to take breaks and stay focused
+- Start immediately when the user directly asks for a timer with a clear duration, or asks to start a Pomodoro and accepts the default.
+- If you are suggesting a Pomodoro yourself, or the duration is ambiguous, ask one short confirmation question before calling pomodoro_start.
+- When host context says a Pomodoro completed, conclude the current focus session: summarize progress briefly, name a sensible stopping point, and suggest a break or next step.
+- When host context says the user returned after a long break, briefly re-orient and help them resume without assuming they are still in the exact prior flow.
 
 Autoloader:
 - list_available_files(filter) — browse the user's documents folder and get safe relative_path values
@@ -1101,6 +1104,7 @@ class StudyTUI(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", show=True, priority=True),
         Binding("ctrl+l", "clear_screen", "Clear", show=True),
+        Binding("ctrl+p", "toggle_pomodoro_timer", "Timer", show=True),
     ]
 
     def __init__(self, file_path: str | None = None, debug: bool = False, **kwargs) -> None:
@@ -1162,6 +1166,12 @@ class StudyTUI(App):
         self._pending_study_workflow: PendingStudyWorkflow | None = None
         self._debug_mode: bool = bool(debug)
         self._debug_tracer = DebugTracer(enabled=self._debug_mode)
+        self._pomodoro_timer_visible: bool = True
+        self._pomodoro_status_text: str = ""
+        self._pomodoro_last_status: str = "idle"
+        self._pomodoro_completion_pending: bool = False
+        self._pomodoro_completion_notified: bool = False
+        self._last_user_message_at: float = 0.0
         self._migrate_legacy_integration_secrets()
 
     def compose(self) -> ComposeResult:
@@ -1170,6 +1180,7 @@ class StudyTUI(App):
         self.add_class(f"theme-{theme}")
 
         yield Header(show_clock=False)
+        yield Static('', id='pomodoro-status')
         yield Static('', id='doc-status-bar', classes='hidden')
         yield ChatView(id="chat-view")
         yield Footer()
@@ -1232,6 +1243,8 @@ class StudyTUI(App):
             await self._load_file(self._initial_file)
 
         self._update_doc_status()
+        self._render_pomodoro_status()
+        self.set_interval(1.0, self._tick_pomodoro_ui)
         chat.focus_input()
 
     def on_unmount(self) -> None:
@@ -1445,6 +1458,91 @@ class StudyTUI(App):
                 bar.remove_class('hidden')
         except Exception:
             return
+
+    @staticmethod
+    def _format_pomodoro_status(status: dict) -> str:
+        state = str(status.get("status", "idle") or "idle")
+        remaining = str(status.get("remaining", "") or "")
+        if state == "working" and remaining:
+            return f"Focus {remaining}"
+        if state == "short_break" and remaining:
+            return f"Break {remaining}"
+        if state == "long_break" and remaining:
+            return f"Long break {remaining}"
+        return ""
+
+    def _render_pomodoro_status(self) -> None:
+        try:
+            widget = self.query_one("#pomodoro-status", Static)
+            text = self._pomodoro_status_text if self._pomodoro_timer_visible else ""
+            widget.update(text)
+            widget.display = bool(text)
+        except Exception:
+            return
+
+    def _queue_pomodoro_completion_context(self) -> None:
+        if self._pomodoro_completion_notified:
+            return
+        self._pomodoro_completion_notified = True
+        self._pomodoro_completion_pending = True
+        try:
+            self.query_one(ChatView).add_system_message("Pomodoro complete. Wrap up this study session.")
+        except Exception:
+            pass
+
+    def _tick_pomodoro_ui(self) -> None:
+        manager = getattr(self, "_agent_manager", None)
+        timer = getattr(manager, "pomodoro", None)
+        if not timer:
+            self._pomodoro_status_text = ""
+            self._pomodoro_last_status = "idle"
+            self._render_pomodoro_status()
+            return
+
+        try:
+            status = timer.status()
+        except Exception:
+            return
+
+        previous = getattr(self, "_pomodoro_last_status", "idle")
+        current = str(status.get("status", "idle") or "idle")
+        if current == "working":
+            self._pomodoro_completion_notified = False
+            self._pomodoro_timer_visible = True
+        if previous == "working" and current in {"short_break", "long_break"} and not self._pomodoro_completion_notified:
+            self._queue_pomodoro_completion_context()
+
+        self._pomodoro_last_status = current
+        self._pomodoro_status_text = self._format_pomodoro_status(status)
+        self._render_pomodoro_status()
+
+    def _pending_pomodoro_context_messages(self, now: float) -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        if getattr(self, "_pomodoro_completion_pending", False):
+            messages.append(
+                self._internal_pending_message(
+                    "[Host internal context — Pomodoro completed before this user message. "
+                    "Conclude the current focus session, summarize progress, and suggest a break or next step.]",
+                    category="pomodoro",
+                )
+            )
+            self._pomodoro_completion_pending = False
+
+        last_user_at = float(getattr(self, "_last_user_message_at", 0.0) or 0.0)
+        if last_user_at > 0:
+            inactive_secs = max(0.0, now - last_user_at)
+            if inactive_secs >= 60 * 60:
+                inactive_mins = int(round(inactive_secs / 60))
+                messages.append(
+                    self._internal_pending_message(
+                        f"[Host internal context — The user was away for about {inactive_mins} minutes "
+                        "and has returned ready to study again. Re-orient briefly, avoid assuming they "
+                        "are still in the previous flow, and help them resume calmly.]",
+                        category="break_return",
+                    )
+                )
+        self._last_user_message_at = now
+        return messages
 
     def _apply_export_privacy(self, mode: str) -> None:
         self._export_privacy = self._normalize_export_privacy(mode)
@@ -1900,6 +1998,18 @@ class StudyTUI(App):
 
     def _capture_tool_result(self, name: str, compact_result) -> None:
         self._note_tool_result(name, compact_result)
+        if name in {"pomodoro_start", "pomodoro_status", "pomodoro_stop"}:
+            previous_status = getattr(self, "_pomodoro_last_status", "idle")
+            if name == "pomodoro_start":
+                self._pomodoro_timer_visible = True
+                self._pomodoro_completion_notified = False
+            if isinstance(compact_result, dict):
+                current_status = str(compact_result.get("status", self._pomodoro_last_status) or "idle")
+                if previous_status == "working" and current_status in {"short_break", "long_break"}:
+                    self._queue_pomodoro_completion_context()
+                self._pomodoro_last_status = current_status
+                self._pomodoro_status_text = self._format_pomodoro_status(compact_result)
+                self._render_pomodoro_status()
         if name == "generate_flashcards":
             parsed_flashcards = None
             json_cards = None
@@ -3840,6 +3950,7 @@ class StudyTUI(App):
             chat.add_system_message("⚠  Set API key first: /key YOUR_API_KEY")
             return
 
+        pending_context = self._pending_pomodoro_context_messages(time.time())
         self._mark_pending_study_workflow(text)
         chat.add_user_message(text)
         self._append_turn("user", text)
@@ -3847,7 +3958,7 @@ class StudyTUI(App):
 
         # Launch generation as a Textual worker so ESC can cancel it
         self._generation_worker = self.run_worker(
-            self._run_generation(), exclusive=True, exit_on_error=False
+            self._run_generation(pending_messages=pending_context or None), exclusive=True, exit_on_error=False
         )
 
     async def _run_generation(

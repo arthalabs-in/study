@@ -482,7 +482,7 @@ async def test_openai_stream_chat_streaming_fallback_and_chat_tool_roundtrip() -
     assert ('search', {'query': 'entropy'}) in seen_tools
     second_stream_call = create_kwargs[1]
     assistant_replay = next(msg for msg in second_stream_call['messages'] if msg.get('role') == 'assistant')
-    assert assistant_replay['reasoning_content'] == 'think'
+    assert 'reasoning_content' not in assistant_replay
 
     chatted = await provider.chat(
         messages=[{'role': 'user', 'content': 'hi'}],

@@ -1654,8 +1654,6 @@ class OpenAIProvider(LLMProvider):
                     "content": round_text or None,
                     "tool_calls": assistant_tool_calls,
                 }
-                if round_reasoning:
-                    assistant_message["reasoning_content"] = round_reasoning
                 working_messages.append(assistant_message)
 
                 executed_calls = await _execute_tool_batch(
@@ -1779,8 +1777,6 @@ class OpenAIProvider(LLMProvider):
                         for tc in msg.tool_calls
                     ],
                 }
-                if round_reasoning:
-                    assistant_message["reasoning_content"] = round_reasoning
                 working_messages.append(assistant_message)
                 executed_calls = await _execute_tool_batch(
                     [
