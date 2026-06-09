@@ -4416,6 +4416,10 @@ class StudyTUI(App):
         chat.write_welcome(self._welcome_overview())
 
 
+    def action_toggle_pomodoro_timer(self) -> None:
+        self._pomodoro_timer_visible = not bool(getattr(self, "_pomodoro_timer_visible", True))
+        self._render_pomodoro_status()
+
 def _prompt_choice(title: str, options: list[str], default_index: int = 0) -> int:
     CLI_CONSOLE.print(f"\n[bold cyan]{title}[/bold cyan]")
     for idx, option in enumerate(options, start=1):

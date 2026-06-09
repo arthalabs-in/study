@@ -436,9 +436,10 @@ def _find_binary(name: str) -> str | None:
     if found:
         return found
     for directory in _candidate_binary_dirs():
-        candidate = directory / (f"{name}.exe" if os.name == "nt" else name)
-        if candidate.exists():
-            return str(candidate)
+        for suffix in ("", ".exe"):
+            candidate = directory / f"{name}{suffix}"
+            if candidate.exists():
+                return str(candidate)
     return None
 
 
