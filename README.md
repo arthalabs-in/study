@@ -9,30 +9,19 @@ Study TUI works over the material you already have: local PDFs, image-heavy note
 ![Bring your own model](https://img.shields.io/badge/models-local%20or%20API-1f6feb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Quick links: [60-second demo](#the-60-second-loop) · [Install](#install) · [Features](#features) · [Commands](#commands) · [Providers](#providers) · [Architecture](#architecture)
+Quick links: [Install](#install) · [Features](#features) · [Commands](#commands) · [Providers](#providers) · [Architecture](#architecture)
 
 <p align="center">
   <img src="docs/readme/hero.svg" alt="Study TUI — loading a physics textbook and chatting with it" width="100%">
 </p>
 
-## The 60-second loop
+## How it works
 
-```text
-load chapter 1 physics
-what are the main ideas here?
-quiz me on the weak points
-make flashcards from the misses
-save a note with the weak areas
-how am i doing on this chapter?
-```
-
-That one flow is the whole product:
+The core workflow is simple:
 - find the right source from a fuzzy request
 - answer from the loaded material, not generic web memory
 - turn weak points into quizzes, flashcards, notes, and review
 - keep progress attached to the document across sessions
-
-For recording or launch posts, use the scripted [public demo flow](docs/launch-demo.md).
 
 ## Why star this?
 
