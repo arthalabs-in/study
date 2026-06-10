@@ -1,62 +1,65 @@
 # Study TUI
 
-Terminal-native AI study cockpit for people with real document libraries.
+Turn your real document library into an AI study workflow, right in the terminal.
 
-Study TUI works over the material you already have: local PDFs, image-heavy notes, Calibre books, and Zotero papers. Instead of being just another PDF chat wrapper, it turns those sources into an agentic study workflow: load a doc with natural language, ask questions, generate quizzes and flashcards, save notes, export to Anki or PDF, and keep progress tied to the document over time.
+Study TUI works over the material you already have: local PDFs, image-heavy notes, Calibre books, and Zotero papers. Load a chapter with natural language, ask grounded questions, quiz weak points, turn misses into flashcards, save notes, export to Anki or PDF, and come back later with progress still tied to the same document.
 
 [![CI](https://github.com/arthalabs-in/study/actions/workflows/ci.yml/badge.svg)](https://github.com/arthalabs-in/study/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Bring your own model](https://img.shields.io/badge/models-local%20or%20API-1f6feb)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Quick links: [Demo Flow](docs/launch-demo.md) · [Features](#features) · [Install](#install) · [First Run](#first-run) · [Commands](#commands) · [Providers](#providers) · [Library Integrations](#library-integrations) · [Architecture](#architecture)
+Quick links: [60-second demo](#the-60-second-loop) · [Install](#install) · [Features](#features) · [Commands](#commands) · [Providers](#providers) · [Architecture](#architecture)
 
 <p align="center">
   <img src="docs/readme/hero.svg" alt="Study TUI — loading a physics textbook and chatting with it" width="100%">
 </p>
 
-### What you can do in under a minute
+## The 60-second loop
 
 ```text
 load chapter 1 physics
 what are the main ideas here?
 quiz me on the weak points
 make flashcards from the misses
+save a note with the weak areas
 how am i doing on this chapter?
 ```
 
-That one flow shows the whole thesis:
-- natural-language retrieval over your own library
-- structured study actions instead of disposable chat
-- progress that stays tied to the same document later
+That one flow is the whole product:
+- find the right source from a fuzzy request
+- answer from the loaded material, not generic web memory
+- turn weak points into quizzes, flashcards, notes, and review
+- keep progress attached to the document across sessions
 
-If you want the exact public demo sequence, use [docs/launch-demo.md](docs/launch-demo.md).
+For recording or launch posts, use the scripted [public demo flow](docs/launch-demo.md).
 
-## Why it’s different
+## Why star this?
 
-- Works with your existing local library instead of forcing a new silo
-- Handles fuzzy document loading across local docs, Calibre, and Zotero
-- Turns retrieval into study actions: quiz, flashcards, notes, export, and review
-- Tracks study progress by document hash so the workflow gets more personal over time
-- Stays terminal-native, keyboard-first, and model-provider flexible
+Most AI study tools start by asking you to upload everything into a new silo. Study TUI starts where your material already lives: folders, screenshots, Calibre libraries, Zotero papers, and messy local PDFs.
 
-## The 30-second loop
+It is built for repeatable study sessions, not disposable chat. The core loop is:
 
 ```text
-1. Point Study TUI at your document directory once
-2. Type: load chapter 1 physics
-3. Ask: what are the main ideas here?
-4. Type: quiz me on the weak points
-5. Type: make flashcards from the misses
-6. Export notes or Anki cards, then come back later and /review
+load -> ask -> quiz -> flashcards -> notes -> progress -> review
 ```
 
-## Best for
+## Built for
 
-- students with large local PDF folders
-- people who already organize material in Calibre or Zotero
-- exam prep workflows that need quizzes, flashcards, notes, and export
-- terminal-first users who want local-model or bring-your-own-provider flexibility
+- students with large PDF folders
+- researchers who live in Zotero
+- readers with Calibre libraries
+- exam prep workflows that need quizzes, flashcards, notes, and review
+- terminal-first users who want local models or bring-your-own-provider flexibility
+
+## Highlights
+
+- **Fuzzy document loading**: say `load chapter 1 physics` and let the agent search local files, Calibre, or Zotero.
+- **Grounded study chat**: ask questions over PDFs, images, notes, and multiple loaded documents.
+- **Interactive quizzes**: generate multiple choice, short-answer, and numeric questions from the material.
+- **Flashcards from misses**: turn weak points into reviewable Q/A cards and export them to Anki.
+- **Document-linked progress**: keep memory tied to the document hash so later sessions can resume intelligently.
+- **Provider flexible**: use OpenAI, Anthropic, Gemini, Groq, Kimi, Codex OAuth, OpenCode Go, Ollama, llama.cpp, or LM Studio.
 
 <details>
 <summary><strong>📝 Quiz Mode</strong> — AI-generated MCQs graded in real time</summary>
