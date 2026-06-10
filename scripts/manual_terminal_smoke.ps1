@@ -27,7 +27,7 @@ $bootstrap = @"
 `$env:USERPROFILE = '$homeDir'
 `$env:STUDY_DOCS_DIR = '$docsDir'
 Set-Location '$repoRoot'
-Write-Host 'Manual smoke checklist: docs/manual-terminal-smoke.md' -ForegroundColor Cyan
+Write-Host 'Launching Study TUI manual smoke session.' -ForegroundColor Cyan
 $launchCommand
 "@
 
